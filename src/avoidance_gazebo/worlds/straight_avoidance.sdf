@@ -1,0 +1,70 @@
+<?xml version="1.0"?>
+<sdf version="1.10">
+  <world name="straight_avoidance">
+    <physics name="default_physics" type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <gravity>0 0 -9.81</gravity>
+    <scene>
+      <ambient>0.65 0.65 0.65 1</ambient>
+      <background>0.78 0.85 0.92 1</background>
+      <shadows>true</shadows>
+    </scene>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>7.5 0 10 0 0 0</pose>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.4 0.1 -0.9</direction>
+    </light>
+
+    <!-- Road: x=0..18.5 m, width=2.50 m. -->
+    <model name="road">
+      <static>true</static>
+      <pose>9.25 0 -0.025 0 0 0</pose>
+      <link name="road_link">
+        <collision name="road_collision"><geometry><box><size>18.5 2.50 0.05</size></box></geometry></collision>
+        <visual name="road_visual">
+          <geometry><box><size>18.5 2.50 0.05</size></box></geometry>
+          <material><ambient>0.12 0.12 0.12 1</ambient><diffuse>0.14 0.14 0.14 1</diffuse><roughness><metalness>0</metalness><roughness>0.95</roughness></roughness></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="yellow_lines"><static>true</static><link name="lines">
+      <visual name="left_yellow"><pose>9.25 1.2125 0.006 0 0 0</pose><geometry><box><size>18.5 0.035 0.008</size></box></geometry><material><ambient>1 0.72 0 1</ambient><diffuse>1 0.72 0 1</diffuse></material></visual>
+      <visual name="right_yellow"><pose>9.25 -1.2125 0.006 0 0 0</pose><geometry><box><size>18.5 0.035 0.008</size></box></geometry><material><ambient>1 0.72 0 1</ambient><diffuse>1 0.72 0 1</diffuse></material></visual>
+    </link></model>
+
+    <model name="white_edge_lines"><static>true</static><link name="lines">
+      <visual name="left_white"><pose>9.25 1.1525 0.007 0 0 0</pose><geometry><box><size>18.5 0.025 0.009</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
+      <visual name="right_white"><pose>9.25 -1.1525 0.007 0 0 0</pose><geometry><box><size>18.5 0.025 0.009</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
+    </link></model>
+
+    <!-- Start and finish are visual-only and exactly 15.0 m apart. -->
+    <model name="start_finish"><static>true</static><link name="lines">
+      <visual name="start"><pose>1.50 0 0.009 0 0 0</pose><geometry><box><size>0.05 2.275 0.012</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
+      <visual name="finish"><pose>16.50 0 0.009 0 0 0</pose><geometry><box><size>0.05 2.275 0.012</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
+    </link></model>
+
+    <!-- 0.05 m high curbs immediately outside the road. -->
+    <model name="left_curb"><static>true</static><pose>9.25 1.325 0.025 0 0 0</pose><link name="curb">
+      <collision name="collision"><geometry><box><size>18.5 0.15 0.05</size></box></geometry></collision>
+      <visual name="visual"><geometry><box><size>18.5 0.15 0.05</size></box></geometry><material><ambient>0.58 0.58 0.58 1</ambient><diffuse>0.62 0.62 0.62 1</diffuse></material></visual>
+    </link></model>
+    <model name="right_curb"><static>true</static><pose>9.25 -1.325 0.025 0 0 0</pose><link name="curb">
+      <collision name="collision"><geometry><box><size>18.5 0.15 0.05</size></box></geometry></collision>
+      <visual name="visual"><geometry><box><size>18.5 0.15 0.05</size></box></geometry><material><ambient>0.58 0.58 0.58 1</ambient><diffuse>0.62 0.62 0.62 1</diffuse></material></visual>
+    </link></model>
+  </world>
+</sdf>

@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>avoidance_gazebo</name>
+  <version>0.1.0</version>
+  <description>Straight obstacle avoidance Gazebo course for turtle_car.</description>
+  <maintainer email="qor@example.com">qor</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
