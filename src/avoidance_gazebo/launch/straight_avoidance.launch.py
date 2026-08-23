@@ -12,10 +12,14 @@ from launch_ros.actions import Node
 
 def _obstacle_layout(seed):
     rng = random.Random(seed)
-    first_x = rng.uniform(9.325, 15.675)
-    second_x = first_x + 5.0
+    # Use integer micrometres so the values written to SDF retain the strict
+    # 10.0..11.35 m spacing and 9.325..20.675 m bounds after formatting.
+    spacing_um = rng.randint(10_000_000, 11_350_000)
+    first_x_um = rng.randint(9_325_000, 20_675_000 - spacing_um)
+    first_x = first_x_um / 1_000_000.0
+    second_x = (first_x_um + spacing_um) / 1_000_000.0
     first_left = bool(rng.getrandbits(1))
-    first_y = 0.585 if first_left else -0.585
+    first_y = 0.780 if first_left else -0.780
     second_y = -first_y
     return first_x, first_y, second_x, second_y
 
@@ -86,7 +90,7 @@ def _launch_course(context):
     return [
         LogInfo(msg=f'[avoidance_gazebo] Generated world: {generated_world}'),
         LogInfo(msg='[avoidance_gazebo] Road: 30.00 m'),
-        LogInfo(msg='[avoidance_gazebo] White-line inner width: 1.56 m'),
+        LogInfo(msg='[avoidance_gazebo] White-line inner width: 1.95 m'),
         LogInfo(msg='[avoidance_gazebo] Start: x=4.00 m'),
         LogInfo(msg='[avoidance_gazebo] Finish: x=26.00 m'),
         LogInfo(msg='[avoidance_gazebo] Start-to-finish distance: 22.00 m'),
@@ -99,7 +103,7 @@ def _launch_course(context):
         LogInfo(msg=(f'[avoidance_gazebo] Obstacle 2: '
                      f'{"LEFT" if second_y > 0 else "RIGHT"}, '
                      f'x={second_x:.2f}, y={second_y:+.3f}')),
-        LogInfo(msg='[avoidance_gazebo] Center longitudinal gap: 5.00 m'),
+        LogInfo(msg=f'[avoidance_gazebo] Center longitudinal gap: {second_x - first_x:.6f} m'),
         LogInfo(msg=f'[avoidance_gazebo] Random seed: {seed_text or "system-random"}'),
         gz,
         rsp,

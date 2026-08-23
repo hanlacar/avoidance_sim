@@ -42,28 +42,28 @@
     </model>
 
     <model name="yellow_lines"><static>true</static><link name="lines">
-      <visual name="left_yellow"><pose>15.0 0.8525 0.006 0 0 0</pose><geometry><box><size>30.0 0.035 0.008</size></box></geometry><material><ambient>1 0.72 0 1</ambient><diffuse>1 0.72 0 1</diffuse></material></visual>
-      <visual name="right_yellow"><pose>15.0 -0.8525 0.006 0 0 0</pose><geometry><box><size>30.0 0.035 0.008</size></box></geometry><material><ambient>1 0.72 0 1</ambient><diffuse>1 0.72 0 1</diffuse></material></visual>
+      <visual name="left_yellow"><pose>15.0 1.0475 0.006 0 0 0</pose><geometry><box><size>30.0 0.035 0.008</size></box></geometry><material><ambient>1 0.72 0 1</ambient><diffuse>1 0.72 0 1</diffuse></material></visual>
+      <visual name="right_yellow"><pose>15.0 -1.0475 0.006 0 0 0</pose><geometry><box><size>30.0 0.035 0.008</size></box></geometry><material><ambient>1 0.72 0 1</ambient><diffuse>1 0.72 0 1</diffuse></material></visual>
     </link></model>
 
     <model name="white_edge_lines"><static>true</static><link name="lines">
-      <!-- Line thickness is 0.025 m: centres at +/-0.7925 put the inner edges at +/-0.7800. -->
-      <visual name="left_white"><pose>15.0 0.7925 0.007 0 0 0</pose><geometry><box><size>30.0 0.025 0.009</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
-      <visual name="right_white"><pose>15.0 -0.7925 0.007 0 0 0</pose><geometry><box><size>30.0 0.025 0.009</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
+      <!-- Line thickness is 0.025 m: centres at +/-0.9875 put the inner edges at +/-0.9750. -->
+      <visual name="left_white"><pose>15.0 0.9875 0.007 0 0 0</pose><geometry><box><size>30.0 0.025 0.009</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
+      <visual name="right_white"><pose>15.0 -0.9875 0.007 0 0 0</pose><geometry><box><size>30.0 0.025 0.009</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
     </link></model>
 
     <!-- Start and finish are visual-only and exactly 22.0 m apart. -->
     <model name="start_finish"><static>true</static><link name="lines">
-      <visual name="start"><pose>4.00 0 0.009 0 0 0</pose><geometry><box><size>0.05 1.56 0.012</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
-      <visual name="finish"><pose>26.00 0 0.009 0 0 0</pose><geometry><box><size>0.05 1.56 0.012</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
+      <visual name="start"><pose>4.00 0 0.009 0 0 0</pose><geometry><box><size>0.05 1.95 0.012</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
+      <visual name="finish"><pose>26.00 0 0.009 0 0 0</pose><geometry><box><size>0.05 1.95 0.012</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
     </link></model>
 
     <!-- 0.05 m high curbs immediately outside the road. -->
-    <model name="left_curb"><static>true</static><pose>15.0 0.975 0.025 0 0 0</pose><link name="curb">
+    <model name="left_curb"><static>true</static><pose>15.0 1.170 0.025 0 0 0</pose><link name="curb">
       <collision name="collision"><geometry><box><size>30.0 0.15 0.05</size></box></geometry></collision>
       <visual name="visual"><geometry><box><size>30.0 0.15 0.05</size></box></geometry><material><ambient>0.58 0.58 0.58 1</ambient><diffuse>0.62 0.62 0.62 1</diffuse></material></visual>
     </link></model>
-    <model name="right_curb"><static>true</static><pose>15.0 -0.975 0.025 0 0 0</pose><link name="curb">
+    <model name="right_curb"><static>true</static><pose>15.0 -1.170 0.025 0 0 0</pose><link name="curb">
       <collision name="collision"><geometry><box><size>30.0 0.15 0.05</size></box></geometry></collision>
       <visual name="visual"><geometry><box><size>30.0 0.15 0.05</size></box></geometry><material><ambient>0.58 0.58 0.58 1</ambient><diffuse>0.62 0.62 0.62 1</diffuse></material></visual>
     </link></model>
