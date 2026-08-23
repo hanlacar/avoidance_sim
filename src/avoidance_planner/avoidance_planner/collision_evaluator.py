@@ -13,6 +13,10 @@ class CollisionRisk:
     collision_path_index: int
     longitudinal_distance: float
     emergency: bool
+    lidar_surface_distance: float = math.inf
+    vehicle_front_surface_distance: float = math.inf
+    obstacle_center_distance: float = math.inf
+    collision_point_distance: float = math.inf
 
 
 def track_box(track, minimum_depth=0.15, minimum_width=0.08):
@@ -42,14 +46,14 @@ def evaluate_track_collision(path, current_pose, track, vehicle_length,
                              longitudinal_safety, monitor_distance,
                              emergency_distance, left_boundary,
                              right_boundary, minimum_obstacle_depth=0.15,
-                             previous_index=0):
+                             previous_index=0, lidar_x_offset=0.65):
     """Sweep the full rectangular vehicle footprint along remaining poses."""
     if not path:
         return CollisionRisk(False, 0, -1, math.inf, False)
     nearest = nearest_path_index(path, current_pose.x, current_pose.y, previous_index)
     lengths = cumulative_lengths(path)
-    obstacle = track_box(track, minimum_obstacle_depth).inflated(
-        longitudinal_safety, lateral_safety)
+    raw_obstacle = track_box(track, minimum_obstacle_depth)
+    obstacle = raw_obstacle.inflated(longitudinal_safety, lateral_safety)
     collision_index = -1
     for index in range(nearest, len(path)):
         forward = lengths[index]-lengths[nearest]
@@ -62,8 +66,19 @@ def evaluate_track_collision(path, current_pose, track, vehicle_length,
             break
     distance = math.hypot(track.x-current_pose.x, track.y-current_pose.y)
     ahead = lengths[collision_index]-lengths[nearest] if collision_index >= 0 else math.inf
+    c, s = math.cos(current_pose.yaw), math.sin(current_pose.yaw)
+    corners = ((raw_obstacle.min_x, raw_obstacle.min_y),
+               (raw_obstacle.min_x, raw_obstacle.max_y),
+               (raw_obstacle.max_x, raw_obstacle.min_y),
+               (raw_obstacle.max_x, raw_obstacle.max_y))
+    forward_edges = tuple((x-current_pose.x)*c+(y-current_pose.y)*s
+                          for x, y in corners)
+    surface_from_base = min(forward_edges)
+    lidar_surface = surface_from_base-lidar_x_offset
+    vehicle_front_surface = surface_from_base-vehicle_length/2.0-center_offset
     return CollisionRisk(collision_index >= 0, nearest, collision_index,
-                         ahead, distance <= emergency_distance)
+                         ahead, lidar_surface <= emergency_distance,
+                         lidar_surface, vehicle_front_surface, distance, ahead)
 
 
 class ReplanDebounce:

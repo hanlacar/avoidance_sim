@@ -1,11 +1,13 @@
 """Visualize a configurable front ROI and detected scan clusters."""
 
 import math
+import signal
 
 import rclpy
 from geometry_msgs.msg import Point, PointStamped
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import LaserScan, PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Bool, Float32
@@ -173,12 +175,14 @@ class FrontLidarNode(Node):
 
 
 def main(args=None):
-    rclpy.init(args=args)
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     node = FrontLidarNode()
     try:
-        rclpy.spin(node)
+        while rclpy.ok():
+            rclpy.spin_once(node, timeout_sec=0.1)
     except KeyboardInterrupt:
-        pass
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
     finally:
         node.destroy_node()
         if rclpy.ok():

@@ -59,7 +59,7 @@ def main(args=None):
         while rclpy.ok():
             rclpy.spin_once(node, timeout_sec=0.1)
     except KeyboardInterrupt:
-        pass
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
     finally:
         node.destroy_node()
         if rclpy.ok():

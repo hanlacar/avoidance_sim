@@ -153,6 +153,27 @@ def test_path_obstacle_collision_is_detected_with_full_footprint():
     assert risk.required and risk.collision_path_index > 0
 
 
+def test_two_metre_trigger_uses_lidar_to_physical_surface_not_center():
+    risk = evaluate_track_collision(
+        straight_route(10), Pose2(3.025, 0, 0), track(), 1.30, 0.78, 0.0,
+        0.20, 0.15, 8.0, 0.5, 1.095, -1.095, 0.65, 0, 0.65)
+    assert risk.lidar_surface_distance == pytest.approx(2.0)
+    assert risk.vehicle_front_surface_distance == pytest.approx(2.0)
+    assert risk.obstacle_center_distance > risk.lidar_surface_distance
+    assert risk.collision_point_distance == risk.longitudinal_distance
+
+
+@pytest.mark.parametrize('distance', [2.0, 3.0, 4.0, 5.0])
+def test_offline_planning_distance_comparison(distance):
+    obstacle = Box2(5.675, 6.325, 0.585, 0.975)
+    current_x = obstacle.min_x-0.65-distance
+    result = plan_candidates(
+        straight_route(), Pose2(current_x, 0.0, 0.0), obstacle,
+        1.095, -1.095)
+    assert len(result.candidates) == 9
+    assert result.selected is not None
+
+
 def test_obstacle_outside_path_is_ignored():
     risk = evaluate_track_collision(
         straight_route(10), Pose2(0, 0, 0), track(y=1.40), 1.30, 0.78, 0.0,
@@ -206,8 +227,23 @@ def nominal_plan():
 
 
 def test_multiple_candidate_paths_are_generated():
-    result = nominal_plan()
-    assert len(result.candidates) == 9
+    result = plan_candidates(
+        straight_route(), Pose2(3.0, 0.0, 0.0),
+        Box2(5.675, 6.325, 0.585, 0.975), 1.095, -1.095,
+        target_fractions=(0.25, 0.50, 0.75, 0.80, 0.85, 0.90))
+    assert len(result.candidates) == 18
+
+
+def test_dense_corridor_edge_sampling_recovers_twenty_degree_candidate():
+    route = tuple(Pose2(index*0.1, 0.0, 0.0) for index in range(216))
+    result = plan_candidates(
+        route, Pose2(14.0622257, 0.0479746, -0.0489444),
+        Box2(16.4647, 17.1147, 0.56179645, 0.823), 1.095, -1.095,
+        target_fractions=(0.25, 0.50, 0.75, 0.80, 0.85, 0.90))
+    assert result.selected is not None
+    assert result.selected.max_steering_rad <= math.radians(20.0)
+    assert result.selected.obstacle_clearance > 0.20
+    assert result.selected.curb_clearance > 0.0
 
 
 def test_candidate_starts_at_current_pose_and_returns_to_csv():

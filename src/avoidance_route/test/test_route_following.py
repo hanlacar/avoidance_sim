@@ -8,7 +8,8 @@ from std_msgs.msg import Bool
 
 from avoidance_route.route_follower import RouteFollower
 from avoidance_route.route_following import (
-    REQUIRED_COLUMNS, RouteError, Waypoint, compute_control, goal_reached,
+    REQUIRED_COLUMNS, RouteError, Waypoint, avoidance_rejoin_ready,
+    compute_control, goal_reached,
     limit_steering, load_route_csv, lookahead_point, nearest_projection,
     pure_pursuit_steering, safety_reason, start_pose_matches)
 
@@ -74,6 +75,14 @@ def test_lookahead_point_selection():
     projection = nearest_projection(points, 1.25, 0.0)
     x, y, index = lookahead_point(points, projection, 1.5)
     assert (x, y, index) == pytest.approx((2.75, 0.0, 3))
+
+
+def test_lookahead_extends_terminal_heading_without_moving_real_goal():
+    points = straight_points()
+    projection = nearest_projection(points, 4.8, 0.04)
+    x, y, index = lookahead_point(points, projection, 1.2)
+    assert (x, y, index) == pytest.approx((6.0, 0.0, 5))
+    assert points[-1].x == pytest.approx(5.0)
 
 
 def test_straight_route_steering_near_zero():
@@ -145,10 +154,60 @@ def test_manual_teleop_publisher_is_reported_as_conflict():
 def test_replan_request_latches_exact_stop_without_restart():
     fake = SimpleNamespace(
         p={'replan_stop_enabled': True}, state='FOLLOWING', reason='',
+        replan_ignore_until_clear=False,
         start_requested=True, _publish_stop=Mock(), _close_actual_log=Mock(),
         _publish_status=Mock(), get_logger=lambda: Mock())
     RouteFollower._replan_required(fake, Bool(data=True))
     assert fake.state == 'STOPPED_FOR_REPLAN'
     assert fake.reason == 'REPLAN_REQUIRED' and not fake.start_requested
     fake._publish_stop.assert_called_once()
-    fake._close_actual_log.assert_called_once()
+    fake._close_actual_log.assert_not_called()
+
+
+def test_completed_track_replan_is_ignored_until_false_acknowledgement():
+    fake = SimpleNamespace(
+        p={'replan_stop_enabled': True}, state='FOLLOWING', reason='',
+        replan_ignore_until_clear=True, _publish_stop=Mock(),
+        _close_actual_log=Mock(), _publish_status=Mock(), get_logger=lambda: Mock())
+    RouteFollower._replan_required(fake, Bool(data=True))
+    assert fake.state == 'FOLLOWING'
+    RouteFollower._replan_required(fake, Bool(data=False))
+    assert not fake.replan_ignore_until_clear
+
+
+def test_gps_and_lidar_outputs_are_never_cross_paired():
+    fake = SimpleNamespace(
+        p={'gps_drive_level': 2.0}, gps_drive_pub=Mock(), gps_wheel_pub=Mock(),
+        lidar_drive_pub=Mock(), lidar_wheel_pub=Mock(), control_source_pub=Mock(),
+        control_source='STOP', _publish_stop=Mock())
+    RouteFollower._publish_source_pair(fake, 'GPS', 7.4)
+    assert fake.gps_drive_pub.publish.call_args.args[0].data == 2.0
+    assert fake.gps_wheel_pub.publish.call_args.args[0].data == 7
+    assert fake.lidar_drive_pub.publish.call_args.args[0].data == 0.0
+    assert fake.lidar_wheel_pub.publish.call_args.args[0].data == 0
+    RouteFollower._publish_source_pair(fake, 'LIDAR', -6.6)
+    assert fake.gps_drive_pub.publish.call_args.args[0].data == 0.0
+    assert fake.gps_wheel_pub.publish.call_args.args[0].data == 0
+    assert fake.lidar_drive_pub.publish.call_args.args[0].data == 1.0
+    assert fake.lidar_wheel_pub.publish.call_args.args[0].data == -7
+
+
+def test_follower_rejects_unclamped_over_limit_control():
+    sharp = (Waypoint(0, 0.0, 0.0, 0.0, 1, 1.0),
+             Waypoint(1, 0.01, 1.0, math.pi/2, 1, 1.0))
+    with pytest.raises(RouteError, match='exceeds'):
+        compute_control(sharp, 0, 0, 0, 0, 0.05, 0.77,
+                        math.radians(20), 0.0, math.radians(2))
+
+
+def test_avoidance_rejoin_requires_forward_continuous_csv_join():
+    goal = Waypoint(100, 8.83, 0.0, 0.0, 1, 1.0)
+    ready, remaining, lateral, yaw_error = avoidance_rejoin_ready(
+        8.18, -0.004, math.radians(-9.5), goal, 0.8, 0.15,
+        math.radians(12.0))
+    assert ready and remaining == pytest.approx(0.65)
+    assert lateral == pytest.approx(0.004)
+    assert yaw_error == pytest.approx(math.radians(9.5))
+    assert not avoidance_rejoin_ready(
+        8.18, -0.004, math.radians(-12.1), goal, 0.8, 0.15,
+        math.radians(12.0))[0]

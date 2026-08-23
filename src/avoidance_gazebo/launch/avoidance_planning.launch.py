@@ -2,7 +2,9 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo
+from launch.actions import (
+    DeclareLaunchArgument, IncludeLaunchDescription, LogInfo,
+    SetEnvironmentVariable)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -27,7 +29,7 @@ def generate_launch_description():
             'use_rviz': use_rviz,
             'record_route': 'false',
             'route_file': route_file,
-            'random_seed': LaunchConfiguration('random_seed'),
+            'obstacle_seed': LaunchConfiguration('obstacle_seed'),
         }.items())
 
     follower = Node(
@@ -44,7 +46,10 @@ def generate_launch_description():
         package='avoidance_planner', executable='avoidance_coordinator',
         parameters=[
             os.path.join(planner_share, 'config', 'avoidance_planner.yaml'),
-            {'use_sim_time': True},
+            {'use_sim_time': True,
+             'replan_trigger_distance_m': LaunchConfiguration(
+                 'replan_trigger_distance_m'),
+             'max_steering_deg': LaunchConfiguration('max_steering_deg')},
         ], condition=IfCondition(planner_enabled), output='screen')
 
     default_route = os.path.join(
@@ -56,16 +61,20 @@ def generate_launch_description():
         DeclareLaunchArgument('use_rviz', default_value='true'),
         DeclareLaunchArgument('auto_start', default_value='false'),
         DeclareLaunchArgument('planner_enabled', default_value='true'),
-        DeclareLaunchArgument('random_seed', default_value='42'),
+        DeclareLaunchArgument('obstacle_seed', default_value='-1'),
+        DeclareLaunchArgument('replan_trigger_distance_m', default_value='2.0'),
+        DeclareLaunchArgument('max_steering_deg', default_value='20.0'),
         DeclareLaunchArgument(
             'actual_path_csv',
             default_value=os.path.join(os.path.expanduser('~'),
                                        'avoidance_sim_ws', 'routes',
                                        'planning_stop_actual.csv')),
-        LogInfo(msg='[avoidance_planning] Planning-only mode: selected path is never driven'),
+        SetEnvironmentVariable('ROS_DOMAIN_ID', '12'),
+        SetEnvironmentVariable('RMW_IMPLEMENTATION', 'rmw_cyclonedds_cpp'),
+        LogInfo(msg='[avoidance_planning] Domain 12 / CycloneDDS'),
+        LogInfo(msg='[avoidance_planning] Selected path requires explicit start service'),
         LogInfo(msg='[avoidance_planning] route_follower owns the only /cmd_vel controller'),
         simulation,
         follower,
         planner,
     ])
-

@@ -1,6 +1,8 @@
 from pathlib import Path
 import re
 
+from avoidance_gazebo.obstacle_layout import generate_layout, same_positions
+
 
 ROOT = Path(__file__).parents[1]
 
@@ -23,6 +25,11 @@ def test_launch_preserves_vehicle_and_sensor_contracts():
     for expected in ("'-x', '3.25'", "'/scan_front@", "'/scan_rear@",
                      "'/odom@", "'/cmd_vel@"):
         assert expected in launch
+    assert '/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist' in launch
+    assert '/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry' in launch
+    assert '/scan_front@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan' in launch
+    assert '/scan_rear@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan' in launch
+    assert '@geometry_msgs/msg/Twist@gz.msgs.Twist' not in launch
 
 
 def test_replay_launch_defaults_safe_and_starts_single_follower():
@@ -41,6 +48,27 @@ def test_planning_launch_defaults_and_control_ownership():
     assert launch.count("executable='route_follower'") == 1
     assert "executable='avoidance_coordinator'" in launch
     assert "'replan_stop_enabled': True" in launch
+    assert "DeclareLaunchArgument('obstacle_seed', default_value='-1')" in launch
+    assert "DeclareLaunchArgument('replan_trigger_distance_m', default_value='2.0')" in launch
+    assert "SetEnvironmentVariable('ROS_DOMAIN_ID', '12')" in launch
+    assert "SetEnvironmentVariable('RMW_IMPLEMENTATION', 'rmw_cyclonedds_cpp')" in launch
     coordinator = (ROOT.parent / 'avoidance_planner' / 'avoidance_planner' /
                    'coordinator_node.py').read_text()
     assert "create_publisher(Twist" not in coordinator
+
+
+def test_fixed_obstacle_seed_is_reproducible():
+    first, second = generate_layout(42), generate_layout(42)
+    assert same_positions(first, second)
+    assert first.seed == second.seed == 42
+
+
+def test_random_layout_never_repeats_previous(tmp_path):
+    state = tmp_path / 'last.yaml'
+    layouts = [generate_layout(-1, state) for _ in range(10)]
+    assert all(not same_positions(first, second)
+               for first, second in zip(layouts, layouts[1:]))
+    for layout in layouts:
+        ordered = layout.ordered
+        assert {y for _, y in ordered} == {-0.780, 0.780}
+        assert 10.0 <= ordered[1][0]-ordered[0][0] <= 11.35

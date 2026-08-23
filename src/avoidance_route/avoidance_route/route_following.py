@@ -43,6 +43,7 @@ class ControlResult:
     target_y: float
     steering_rad: float
     angular_rate: float
+    requested_steering_rad: float
 
 
 REQUIRED_COLUMNS = ('index', 'x_m', 'y_m', 'yaw', 'direction', 'drive_level')
@@ -131,18 +132,27 @@ def lookahead_point(points, projection, distance):
         segment += 1
         x, y = points[segment].x, points[segment].y
     last = points[-1]
-    return last.x, last.y, len(points) - 1
+    # A target fixed at the final waypoint becomes singular as the vehicle
+    # approaches it laterally.  Continue the lookahead along the declared
+    # terminal heading; goal detection still uses the real final waypoint.
+    return (last.x + remaining*math.cos(last.yaw),
+            last.y + remaining*math.sin(last.yaw), len(points) - 1)
 
 
 def pure_pursuit_steering(x, y, yaw, target_x, target_y,
                           wheelbase, max_steering_rad):
+    steering = required_pure_pursuit_steering(
+        x, y, yaw, target_x, target_y, wheelbase)
+    return max(-max_steering_rad, min(max_steering_rad, steering))
+
+
+def required_pure_pursuit_steering(x, y, yaw, target_x, target_y, wheelbase):
     dx, dy = target_x-x, target_y-y
     distance = math.hypot(dx, dy)
     if distance <= 1.0e-9:
         raise RouteError('lookahead target coincides with vehicle')
     alpha = normalize_angle(math.atan2(dy, dx) - yaw)
-    steering = math.atan(2.0 * wheelbase * math.sin(alpha) / distance)
-    return max(-max_steering_rad, min(max_steering_rad, steering))
+    return math.atan(2.0 * wheelbase * math.sin(alpha) / distance)
 
 
 def limit_steering(previous, requested, max_delta):
@@ -155,14 +165,18 @@ def compute_control(points, x, y, yaw, start_segment, lookahead_m,
                     max_steering_delta_rad):
     nearest = nearest_projection(points, x, y, start_segment)
     tx, ty, lookahead_index = lookahead_point(points, nearest, lookahead_m)
-    requested = pure_pursuit_steering(
-        x, y, yaw, tx, ty, wheelbase_m, max_steering_rad)
+    requested = required_pure_pursuit_steering(
+        x, y, yaw, tx, ty, wheelbase_m)
+    if abs(requested) > max_steering_rad+1.0e-9:
+        raise RouteError(
+            f'required steering {math.degrees(requested):.3f} deg exceeds '
+            f'{math.degrees(max_steering_rad):.3f} deg')
     steering = limit_steering(
         previous_steering, requested, max_steering_delta_rad)
     nearest_index = nearest.segment + (1 if nearest.ratio >= 0.5 else 0)
     # angular.z is yaw rate for Gazebo's Twist Ackermann interface.
     return ControlResult(nearest, nearest_index, lookahead_index, tx, ty,
-                         steering, math.tan(steering) / wheelbase_m)
+                         steering, math.tan(steering) / wheelbase_m, requested)
 
 
 def start_pose_errors(x, y, yaw, route_start):
@@ -175,6 +189,17 @@ def start_pose_matches(x, y, yaw, route_start, position_tolerance,
     position_error, yaw_error = start_pose_errors(x, y, yaw, route_start)
     return (position_error <= position_tolerance and yaw_error <= yaw_tolerance_rad,
             position_error, yaw_error)
+
+
+def avoidance_rejoin_ready(x, y, yaw, goal, max_remaining,
+                           lateral_tolerance, yaw_tolerance_rad):
+    dx, dy = goal.x-x, goal.y-y
+    remaining = dx*math.cos(goal.yaw)+dy*math.sin(goal.yaw)
+    lateral = abs(-dx*math.sin(goal.yaw)+dy*math.cos(goal.yaw))
+    yaw_error = abs(normalize_angle(yaw-goal.yaw))
+    ready = (0.0 <= remaining <= max_remaining and
+             lateral <= lateral_tolerance and yaw_error <= yaw_tolerance_rad)
+    return ready, remaining, lateral, yaw_error
 
 
 def safety_reason(odom_age, odom_timeout, cross_track_error,

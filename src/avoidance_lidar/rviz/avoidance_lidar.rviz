@@ -139,6 +139,14 @@ Visualization Manager:
       Line Style: Lines
       Line Width: 0.10
       Color: 255; 0; 255
+    - Class: rviz_default_plugins/Path
+      Name: Actual Avoidance Path
+      Enabled: true
+      Topic:
+        Value: /avoidance/actual_avoidance_path
+      Line Style: Lines
+      Line Width: 0.08
+      Color: 0; 255; 255
     - Class: rviz_default_plugins/MarkerArray
       Name: Candidate Avoidance Paths
       Enabled: true

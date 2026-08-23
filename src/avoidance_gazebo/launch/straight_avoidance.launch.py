@@ -1,5 +1,4 @@
 import os
-import random
 import re
 import tempfile
 
@@ -11,19 +10,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
 
-
-def _obstacle_layout(seed):
-    rng = random.Random(seed)
-    # Use integer micrometres so the values written to SDF retain the strict
-    # 10.0..11.35 m spacing and 9.325..20.675 m bounds after formatting.
-    spacing_um = rng.randint(10_000_000, 11_350_000)
-    first_x_um = rng.randint(9_325_000, 20_675_000 - spacing_um)
-    first_x = first_x_um / 1_000_000.0
-    second_x = (first_x_um + spacing_um) / 1_000_000.0
-    first_left = bool(rng.getrandbits(1))
-    first_y = 0.780 if first_left else -0.780
-    second_y = -first_y
-    return first_x, first_y, second_x, second_y
+from avoidance_gazebo.obstacle_layout import generate_layout
 
 
 def _launch_course(context):
@@ -32,13 +19,14 @@ def _launch_course(context):
     template_path = os.path.join(pkg, 'worlds', 'straight_avoidance.sdf')
     xacro_file = os.path.join(pkg, 'urdf', 'turtle_car.urdf.xacro')
 
-    seed_text = LaunchConfiguration('random_seed').perform(context).strip()
+    seed_text = LaunchConfiguration('obstacle_seed').perform(context).strip()
     spawn_text = LaunchConfiguration('spawn_obstacles').perform(context).strip().lower()
     if spawn_text not in ('true', 'false', '1', '0', 'yes', 'no', 'on', 'off'):
         raise ValueError('spawn_obstacles must be true or false')
     spawn_obstacles = spawn_text in ('true', '1', 'yes', 'on')
-    seed = None if seed_text == '' else int(seed_text)
-    first_x, first_y, second_x, second_y = _obstacle_layout(seed)
+    seed = int(seed_text)
+    layout = generate_layout(seed)
+    (first_x, first_y), (second_x, second_y) = layout.ordered
 
     with open(template_path, 'r', encoding='utf-8') as source:
         world_text = source.read()
@@ -91,10 +79,10 @@ def _launch_course(context):
         package='ros_gz_bridge',
         executable='parameter_bridge',
         arguments=[
-            '/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist',
-            '/odom@nav_msgs/msg/Odometry@gz.msgs.Odometry',
-            '/scan_front@sensor_msgs/msg/LaserScan@gz.msgs.LaserScan',
-            '/scan_rear@sensor_msgs/msg/LaserScan@gz.msgs.LaserScan',
+            '/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist',
+            '/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry',
+            '/scan_front@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',
+            '/scan_rear@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',
             '/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V',
             '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
         ],
@@ -132,7 +120,8 @@ def _launch_course(context):
                      f'{"LEFT" if second_y > 0 else "RIGHT"}, '
                      f'x={second_x:.2f}, y={second_y:+.3f}')),
         LogInfo(msg=f'[avoidance_gazebo] Center longitudinal gap: {second_x - first_x:.6f} m'),
-        LogInfo(msg=f'[avoidance_gazebo] Random seed: {seed_text or "system-random"}'),
+        LogInfo(msg=f'[avoidance_gazebo] Obstacle seed: {layout.seed} '
+                    f'({"system-random" if seed < 0 else "fixed"})'),
     ] if spawn_obstacles else [
         LogInfo(msg='[avoidance_gazebo] REFERENCE RECORDING MODE: OBSTACLES DISABLED')
     ])
@@ -162,8 +151,8 @@ def _launch_course(context):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
-            'random_seed', default_value='',
-            description='Optional integer seed for reproducible obstacle layout.'),
+            'obstacle_seed', default_value='-1',
+            description='-1 uses protected system randomness; >=0 is reproducible.'),
         DeclareLaunchArgument(
             'spawn_obstacles', default_value='false',
             description='Generate the two seeded obstacles (default: false).'),
