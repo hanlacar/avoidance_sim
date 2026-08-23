@@ -34,6 +34,7 @@ class Candidate:
     path: tuple
     target_d: float
     return_s: float
+    return_length: float
     valid: bool
     reason: str
     max_curvature: float
@@ -272,16 +273,20 @@ def plan_candidates(route, current_pose, obstacle_box, left_boundary,
                     reason = 'CURVATURE_LIMIT_EXCEEDED'
             valid = not reason
             candidate = Candidate(
-                candidate_id, path, target, return_s, valid, reason,
+                candidate_id, path, target, return_s, return_length, valid, reason,
                 max_curvature, max_steering, curvature_rate,
                 obstacle_clearance, curb_clearance, length)
             if valid:
-                # Clearance dominates; smoothness, length, and CSV offset are
-                # deterministic tie-breakers among already-safe candidates.
+                # Clearance dominates.  Longer return transitions are rewarded
+                # because the 20 Hz rate-limited follower can track them with
+                # more margin than an equally collision-free short transition.
                 candidate.score = (
                     -4.0*min(obstacle_clearance, 2.0)
                     -3.0*min(curb_clearance, 2.0)
-                    +2.0*curvature_rate + 0.05*length + abs(target))
+                    +2.0*curvature_rate
+                    +1.5*max_steering
+                    -0.20*return_length
+                    +0.02*length + abs(target))
             candidates.append(candidate)
             candidate_id += 1
             validation_seconds += time.perf_counter()-phase_started

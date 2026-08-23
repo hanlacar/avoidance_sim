@@ -3,6 +3,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from avoidance_planner.coordinator_node import AvoidanceCoordinator, PLANNER_STATES
+from pathlib import Path
+import yaml
 
 
 def test_required_planner_states_are_present():
@@ -11,7 +13,7 @@ def test_required_planner_states_are_present():
         'REPLAN_REQUIRED', 'STOPPING', 'STOPPED_FOR_PLANNING',
         'DETECTING_BOUNDARIES', 'BUILDING_CORRIDOR',
         'GENERATING_CANDIDATES', 'VALIDATING_CANDIDATES', 'PATH_READY',
-        'PATH_INFEASIBLE', 'DYNAMIC_OBSTACLE_STOP', 'ERROR'}
+        'PATH_INFEASIBLE', 'DYNAMIC_OBSTACLE_STOP', 'TIME_RESET_STOP', 'ERROR'}
     assert set(PLANNER_STATES) == required
 
 
@@ -26,6 +28,23 @@ def test_planner_latches_replan_but_does_not_compete_for_mcu_outputs():
 def test_planner_has_no_cmd_vel_publisher_contract():
     source = __import__('inspect').getsource(AvoidanceCoordinator.__init__)
     assert "create_publisher(Twist" not in source
+
+
+def test_dynamic_to_static_transition_cannot_return_to_latched_csv_deadlock():
+    source = __import__('inspect').getsource(AvoidanceCoordinator._tick)
+    stationary_block = source.split(
+        "self.selected_track.state == STATIC_OBSTACLE):", 1)[1].split(
+            "if self.state in ('PATH_READY'", 1)[0]
+    assert "self._set_state('REPLAN_REQUIRED'" in stationary_block
+    assert "self._set_state('STOPPING'" in stationary_block
+    assert "self._set_state('FOLLOWING_CSV'" not in stationary_block
+
+
+def test_rejoin_extension_gives_rate_limited_follower_settling_distance():
+    config = yaml.safe_load((Path(__file__).parents[1] / 'config' /
+                             'avoidance_planner.yaml').read_text())
+    assert config['avoidance_coordinator']['ros__parameters'][
+        'rejoin_straight_extension_m'] >= 2.0
 
 
 def test_tf_drop_diagnostics_separate_startup_and_runtime():

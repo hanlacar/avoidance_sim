@@ -3,8 +3,10 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
-    DeclareLaunchArgument, IncludeLaunchDescription, LogInfo,
-    SetEnvironmentVariable)
+    DeclareLaunchArgument, EmitEvent, IncludeLaunchDescription, LogInfo,
+    RegisterEventHandler, SetEnvironmentVariable)
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -55,6 +57,13 @@ def generate_launch_description():
              'max_steering_deg': LaunchConfiguration('max_steering_deg')},
         ], condition=IfCondition(planner_enabled), output='screen')
 
+    follower_exit_shutdown = RegisterEventHandler(OnProcessExit(
+        target_action=follower,
+        on_exit=[
+            LogInfo(msg='[avoidance_planning] ERROR: route_follower exited; shutting down all nodes'),
+            EmitEvent(event=Shutdown(reason='route_follower exited')),
+        ]))
+
     default_route = os.path.join(
         os.path.expanduser('~'), 'avoidance_sim_ws', 'routes',
         'straight_reference.csv')
@@ -78,6 +87,7 @@ def generate_launch_description():
                     '/avoidance/start_selected_path stays available for debugging only'),
         LogInfo(msg='[avoidance_planning] route_follower owns the only /cmd_vel controller'),
         simulation,
+        follower_exit_shutdown,
         follower,
         planner,
     ])

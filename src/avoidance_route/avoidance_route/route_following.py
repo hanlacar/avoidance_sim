@@ -192,12 +192,13 @@ def start_pose_matches(x, y, yaw, route_start, position_tolerance,
 
 
 def avoidance_rejoin_ready(x, y, yaw, goal, max_remaining,
-                           lateral_tolerance, yaw_tolerance_rad):
+                           lateral_tolerance, yaw_tolerance_rad,
+                           max_overshoot=0.0):
     dx, dy = goal.x-x, goal.y-y
     remaining = dx*math.cos(goal.yaw)+dy*math.sin(goal.yaw)
     lateral = abs(-dx*math.sin(goal.yaw)+dy*math.cos(goal.yaw))
     yaw_error = abs(normalize_angle(yaw-goal.yaw))
-    ready = (0.0 <= remaining <= max_remaining and
+    ready = (-max(0.0, max_overshoot) <= remaining <= max_remaining and
              lateral <= lateral_tolerance and yaw_error <= yaw_tolerance_rad)
     return ready, remaining, lateral, yaw_error
 

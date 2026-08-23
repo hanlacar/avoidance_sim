@@ -8,6 +8,7 @@ from geometry_msgs.msg import Point, PointStamped
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
+from rclpy.time import Time
 from sensor_msgs.msg import LaserScan, PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Bool, Float32
@@ -53,6 +54,8 @@ class FrontLidarNode(Node):
         self.valid_pub = self.create_publisher(
             Bool, '/avoidance/lidar/valid', 10)
         self.last_scan_time = None
+        self.last_scan_stamp_ns = None
+        self.last_watchdog_time = None
         self.last_frame = ''
         self.create_subscription(
             LaserScan, str(self.values['scan_topic']), self._scan,
@@ -83,6 +86,16 @@ class FrontLidarNode(Node):
 
     def _scan(self, scan):
         now = self.get_clock().now()
+        stamp_ns = Time.from_msg(scan.header.stamp).nanoseconds
+        if self.last_scan_stamp_ns is not None and stamp_ns < self.last_scan_stamp_ns:
+            self.last_scan_time = None
+            self.valid_pub.publish(Bool(data=False))
+            self.get_logger().error(
+                f'TIME_RESET_STOP: scan stamp regressed '
+                f'{self.last_scan_stamp_ns}->{stamp_ns}')
+            self.last_scan_stamp_ns = stamp_ns
+            return
+        self.last_scan_stamp_ns = stamp_ns
         self.last_scan_time = now
         self.last_frame = scan.header.frame_id
         if not self.last_frame:
@@ -159,10 +172,18 @@ class FrontLidarNode(Node):
         self.nearest_marker_pub.publish(marker)
 
     def _watchdog(self):
+        now = self.get_clock().now()
+        if self.last_watchdog_time is not None and now.nanoseconds <= self.last_watchdog_time.nanoseconds:
+            self.valid_pub.publish(Bool(data=False))
+            self.detected_pub.publish(Bool(data=False))
+            self.last_scan_time = None
+            self.last_watchdog_time = now
+            return
+        self.last_watchdog_time = now
         if self.last_scan_time is None:
             self.valid_pub.publish(Bool(data=False))
             return
-        age = (self.get_clock().now() - self.last_scan_time).nanoseconds / 1e9
+        age = (now - self.last_scan_time).nanoseconds / 1e9
         if age <= float(self.values['scan_timeout_s']):
             return
         self.valid_pub.publish(Bool(data=False))

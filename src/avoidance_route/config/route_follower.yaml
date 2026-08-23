@@ -28,7 +28,7 @@ route_follower:
     avoidance_rejoin_lateral_tolerance_m: 0.10
     avoidance_rejoin_yaw_tolerance_deg: 2.0
     avoidance_rejoin_steering_tolerance_deg: 2.0
-    avoidance_rejoin_alignment_distance_m: 1.0
+    avoidance_rejoin_alignment_distance_m: 2.0
     auto_start_avoidance: true
     path_ready_hold_sec: 0.30
     csv_rejoin_lookahead_m: 2.0

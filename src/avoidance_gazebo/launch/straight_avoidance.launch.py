@@ -11,9 +11,11 @@ from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
 
 from avoidance_gazebo.obstacle_layout import generate_layout
+from avoidance_gazebo.launch_guard import acquire_simulation_lock
 
 
 def _launch_course(context):
+    lock_path = acquire_simulation_lock(os.environ.get('ROS_DOMAIN_ID', '12'))
     pkg = get_package_share_directory('avoidance_gazebo')
     ros_gz_sim = get_package_share_directory('ros_gz_sim')
     template_path = os.path.join(pkg, 'worlds', 'straight_avoidance.sdf')
@@ -127,6 +129,7 @@ def _launch_course(context):
     ])
 
     return [
+        LogInfo(msg=f'[avoidance_gazebo] Single-simulator lock: {lock_path}'),
         LogInfo(msg=f'[avoidance_gazebo] Generated world: {generated_world}'),
         LogInfo(msg='[avoidance_gazebo] Road: 30.00 m'),
         LogInfo(msg='[avoidance_gazebo] White-line inner width: 1.95 m'),

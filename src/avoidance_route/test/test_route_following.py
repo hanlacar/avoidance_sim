@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+import yaml
 from std_msgs.msg import Bool
 
 from avoidance_route.route_follower import RouteFollower
@@ -133,6 +134,74 @@ def test_shutdown_stop_command_is_exact_zero():
     command = fake.cmd_pub.publish.call_args.args[0]
     assert command.linear.x == 0.0 and command.angular.z == 0.0
     assert fake.steering_pub.publish.call_args.args[0].data == 0.0
+
+
+def _time_control_fake(now_ns, last_ns):
+    from rclpy.time import Time
+    now = Time(nanoseconds=now_ns)
+    return SimpleNamespace(
+        get_clock=lambda: SimpleNamespace(now=lambda: now),
+        last_control_time=(None if last_ns is None else Time(nanoseconds=last_ns)),
+        last_clock_time=None, last_control_dt=999.0, odom=None,
+        state='FOLLOWING', p={
+            'clock_reset_threshold_s': 1.0,
+            'clock_forward_jump_threshold_s': 2.0,
+        }, _publish_stop=Mock(), _publish_status=Mock(),
+        _handle_time_jump=Mock())
+
+
+def test_control_with_none_time_publishes_exactly_one_safe_cycle():
+    fake = _time_control_fake(0, None)
+    RouteFollower._control(fake)
+    fake._publish_stop.assert_called_once()
+    assert fake.last_control_time.nanoseconds == 0
+    assert fake.last_control_dt is None
+
+
+def test_second_control_callback_has_valid_bounded_dt():
+    fake = _time_control_fake(1_050_000_000, 1_000_000_000)
+    RouteFollower._control(fake)
+    assert fake.last_control_dt == pytest.approx(0.05)
+    fake._publish_stop.assert_called_once()  # no odom remains fail-safe
+
+
+def test_large_positive_delta_is_clamped_without_stale_command():
+    fake = _time_control_fake(2_000_000_000, 1_000_000_000)
+    RouteFollower._control(fake)
+    assert fake.last_control_dt == pytest.approx(0.2)
+    fake._publish_stop.assert_called_once()
+
+
+@pytest.mark.parametrize('now_ns,last_ns', [
+    (1_000_000_000, 1_000_000_000),
+    (900_000_000, 1_000_000_000),
+])
+def test_repeated_or_backward_time_enters_safe_time_jump_path(now_ns, last_ns):
+    fake = _time_control_fake(now_ns, last_ns)
+    fake._handle_time_jump.side_effect = lambda *_args: fake._publish_stop()
+    RouteFollower._control(fake)
+    fake._handle_time_jump.assert_called_once()
+    fake._publish_stop.assert_called_once()
+
+
+def test_time_reset_recovery_requires_all_inputs_path_and_exact_tf():
+    token = object()
+    fake = SimpleNamespace(
+        time_reset_is_large=False,
+        time_reset_resume_state='FOLLOWING_AVOIDANCE',
+        odom_receive_time=token, last_scan_receive_time=token,
+        last_rear_scan_receive_time=token, selected_path_receive_time=None,
+        _tf_is_valid=Mock(return_value=True))
+    assert not RouteFollower._time_reset_recovery_ready(fake)
+    fake.selected_path_receive_time = token
+    assert RouteFollower._time_reset_recovery_ready(fake)
+    fake._tf_is_valid.return_value = False
+    assert not RouteFollower._time_reset_recovery_ready(fake)
+
+
+def test_large_simulation_reset_never_auto_recovers():
+    fake = SimpleNamespace(time_reset_is_large=True)
+    assert not RouteFollower._time_reset_recovery_ready(fake)
 
 
 def test_compute_control_reports_indices_and_finite_yaw_rate():
@@ -269,3 +338,23 @@ def test_avoidance_rejoin_requires_forward_continuous_csv_join():
     assert not avoidance_rejoin_ready(
         8.18, -0.004, math.radians(-12.1), goal, 0.8, 0.15,
         math.radians(12.0))[0]
+
+
+def test_rejoin_allows_bounded_terminal_overshoot_only_when_aligned():
+    goal = Waypoint(100, 8.0, 0.0, 0.0, 1, 1.0)
+    assert avoidance_rejoin_ready(
+        8.25, 0.04, math.radians(1.0), goal, 0.8, 0.10,
+        math.radians(2.0), max_overshoot=0.5)[0]
+    assert not avoidance_rejoin_ready(
+        8.51, 0.04, math.radians(1.0), goal, 0.8, 0.10,
+        math.radians(2.0), max_overshoot=0.5)[0]
+    assert not avoidance_rejoin_ready(
+        8.25, 0.11, math.radians(1.0), goal, 0.8, 0.10,
+        math.radians(2.0), max_overshoot=0.5)[0]
+
+
+def test_rejoin_alignment_zone_provides_two_metres_to_settle():
+    config = yaml.safe_load((__import__('pathlib').Path(__file__).parents[1] /
+                             'config' / 'route_follower.yaml').read_text())
+    assert config['route_follower']['ros__parameters'][
+        'avoidance_rejoin_alignment_distance_m'] >= 2.0

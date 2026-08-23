@@ -1,6 +1,7 @@
 """Exclusive ownership of the simulation's /cmd_vel command authority."""
 
 import fcntl
+import os
 from pathlib import Path
 
 
@@ -25,7 +26,7 @@ class CommandAuthority:
                 f'/cmd_vel authority is already owned by {active}') from exc
         self.stream.seek(0)
         self.stream.truncate()
-        self.stream.write(owner)
+        self.stream.write(f'{owner} pid={os.getpid()}')
         self.stream.flush()
 
     def close(self):

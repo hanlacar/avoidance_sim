@@ -66,6 +66,32 @@ def test_planning_launch_propagates_max_steering_to_follower():
     assert "'auto_start_avoidance': auto_start_avoidance" in follower_block
 
 
+def test_clock_bridge_is_single_direction_gz_to_ros_and_unique():
+    launch = (ROOT / 'launch' / 'straight_avoidance.launch.py').read_text()
+    token = "'/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock'"
+    assert launch.count(token) == 1
+    assert '/clock@rosgraph_msgs/msg/Clock@gz.msgs.Clock' not in launch
+    assert '/clock@rosgraph_msgs/msg/Clock]gz.msgs.Clock' not in launch
+
+
+def test_all_major_nodes_use_sim_time_and_follower_exit_stops_launch():
+    straight = (ROOT / 'launch' / 'straight_avoidance.launch.py').read_text()
+    planning = (ROOT / 'launch' / 'avoidance_planning.launch.py').read_text()
+    assert straight.count("'use_sim_time': True") >= 5
+    assert planning.count("'use_sim_time': True") >= 2
+    assert 'OnProcessExit' in planning and "target_action=follower" in planning
+    assert "Shutdown(reason='route_follower exited')" in planning
+
+
+def test_launch_has_single_simulator_domain_lock():
+    launch = (ROOT / 'launch' / 'straight_avoidance.launch.py').read_text()
+    assert launch.count('acquire_simulation_lock(') == 1
+    guard = (ROOT / 'avoidance_gazebo' / 'launch_guard.py').read_text()
+    for process in ('parameter_bridge /cmd_vel', 'route_follower',
+                    'avoidance_coordinator', 'gz sim '):
+        assert process in guard
+
+
 def test_routes_directory_has_exactly_one_reference_csv_and_yaml():
     routes = ROOT.parents[1] / 'routes'
     csv_files = sorted(p.name for p in routes.glob('*.csv'))

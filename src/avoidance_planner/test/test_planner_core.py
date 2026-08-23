@@ -331,6 +331,14 @@ def test_valid_candidate_selection_prefers_finite_score():
     assert result.selected.score == min(c.score for c in result.candidates if c.valid)
 
 
+def test_selected_path_prefers_tracking_margin_from_longer_return():
+    result = nominal_plan()
+    same_target = [candidate for candidate in result.candidates
+                   if candidate.valid and candidate.target_d == result.selected.target_d]
+    assert result.selected.return_length == max(
+        candidate.return_length for candidate in same_target)
+
+
 def test_no_valid_candidate_returns_path_infeasible_input():
     result = plan_candidates(
         straight_route(), Pose2(5.0, 0, 0),

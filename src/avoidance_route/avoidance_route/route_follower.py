@@ -14,10 +14,13 @@ from nav_msgs.msg import Odometry, Path as PathMsg
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
+from rclpy.duration import Duration
+from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, Float32, Int32, String
 from std_srvs.srv import Trigger
 from visualization_msgs.msg import Marker
+from tf2_ros import Buffer, TransformException, TransformListener
 
 from .authority import CommandAuthority, CommandAuthorityError
 from .route_following import (
@@ -31,7 +34,7 @@ STATES = ('WAITING_FOR_ODOM', 'WAITING_FOR_ROUTE', 'START_POSE_CHECK',
           'READY', 'FOLLOWING', 'GOAL_REACHED', 'STOPPED',
           'STOPPED_FOR_REPLAN', 'WAITING_FOR_AVOIDANCE_START',
           'FOLLOWING_AVOIDANCE', 'REJOINING_CSV', 'REJOIN_ALIGNING',
-          'REJOIN_FAILED', 'ERROR')
+          'REJOIN_FAILED', 'TIME_RESET_STOP', 'ERROR')
 
 
 class RouteFollower(Node):
@@ -59,6 +62,7 @@ class RouteFollower(Node):
             'avoidance_lookahead_m': 1.2,
             'avoidance_max_cross_track_error_m': 0.20,
             'avoidance_rejoin_remaining_m': 0.80,
+            'avoidance_rejoin_max_overshoot_m': 0.50,
             'avoidance_rejoin_lateral_tolerance_m': 0.10,
             'avoidance_rejoin_yaw_tolerance_deg': 2.0,
             'avoidance_rejoin_steering_tolerance_deg': 2.0,
@@ -69,6 +73,9 @@ class RouteFollower(Node):
             'scan_timeout_s': 0.30,
             'auto_start_avoidance': True,
             'path_ready_hold_sec': 0.30,
+            'clock_forward_jump_threshold_s': 2.0,
+            'clock_reset_threshold_s': 1.0,
+            'tf_timeout_s': 0.05,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -120,6 +127,11 @@ class RouteFollower(Node):
         self.steering = 0.0
         self.speed = 0.0
         self.last_control_time = None
+        self.last_control_dt = None
+        self.last_clock_time = None
+        self.time_reset_resume_state = None
+        self.time_reset_is_large = False
+        self.time_reset_logged = False
         self.start_time = None
         self.actual_path = PathMsg()
         self.last_actual_xy = None
@@ -144,6 +156,11 @@ class RouteFollower(Node):
         self.avoidance_cte_samples = []
         self.avoidance_steering_samples = []
         self.last_scan_receive_time = None
+        self.last_rear_scan_receive_time = None
+        self.last_odom_stamp_ns = None
+        self.last_front_scan_stamp_ns = None
+        self.last_rear_scan_stamp_ns = None
+        self.selected_path_stamp_ns = None
         self.replan_ignore_until_clear = False
         self.csv_rejoin_recovery = False
         self.csv_rejoin_start_xy = None
@@ -183,8 +200,12 @@ class RouteFollower(Node):
             Int32, '/avoidance/selected_track_id', self._selected_track, qos)
         self.create_subscription(
             LaserScan, '/scan_front', self._scan, qos_profile_sensor_data)
+        self.create_subscription(
+            LaserScan, '/scan_rear', self._rear_scan, qos_profile_sensor_data)
+        self.tf_buffer = Buffer(node=self)
+        self.tf_listener = TransformListener(self.tf_buffer, self)
         period = 1.0 / max(1.0, float(self.p['control_rate_hz']))
-        self.create_timer(period, self._control)
+        self.create_timer(period, self._safe_control)
         self.get_logger().info(
             f'Route follower loaded {len(self.points)} points; wheelbase=0.77 m, '
             f'max steering=+/-{float(self.p["max_steering_deg"]):.1f} deg; '
@@ -202,6 +223,10 @@ class RouteFollower(Node):
         if not msg.header.frame_id or not all(math.isfinite(v) for v in values):
             self._error('INVALID_ODOMETRY', 'non-finite odometry or empty frame')
             return
+        stamp_ns = self._stamp_ns(msg.header.stamp)
+        if self._input_stamp_regressed('odom', stamp_ns, self.last_odom_stamp_ns):
+            return
+        self.last_odom_stamp_ns = stamp_ns
         self.odom = msg
         self.odom_receive_time = self.get_clock().now()
         if self.state == 'WAITING_FOR_ODOM':
@@ -215,11 +240,39 @@ class RouteFollower(Node):
                   'REJOIN_ALIGNING'):
             self._append_avoidance_actual(msg)
 
-    def _scan(self, _msg):
+    def _scan(self, msg):
+        stamp_ns = self._stamp_ns(msg.header.stamp)
+        if self._input_stamp_regressed(
+                'scan_front', stamp_ns, self.last_front_scan_stamp_ns):
+            return
+        self.last_front_scan_stamp_ns = stamp_ns
         self.last_scan_receive_time = self.get_clock().now()
+
+    def _rear_scan(self, msg):
+        stamp_ns = self._stamp_ns(msg.header.stamp)
+        if self._input_stamp_regressed(
+                'scan_rear', stamp_ns, self.last_rear_scan_stamp_ns):
+            return
+        self.last_rear_scan_stamp_ns = stamp_ns
+        self.last_rear_scan_receive_time = self.get_clock().now()
+
+    @staticmethod
+    def _stamp_ns(stamp):
+        return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+
+    def _input_stamp_regressed(self, source, stamp_ns, previous_ns):
+        if previous_ns is not None and stamp_ns < previous_ns:
+            self._handle_time_jump(
+                self.get_clock().now(), True,
+                f'{source} stamp regressed {previous_ns}->{stamp_ns}')
+            return True
+        return False
 
     def _replan_required(self, msg):
         if not bool(self.p['replan_stop_enabled']):
+            return
+        if self.state in ('ERROR', 'TIME_RESET_STOP'):
+            self._publish_stop()
             return
         if not msg.data:
             self.replan_ignore_until_clear = False
@@ -260,6 +313,10 @@ class RouteFollower(Node):
                 self._error('RUNTIME_TF_FAILURE', payload.get('last_tf_error', ''))
 
     def _selected_path(self, msg):
+        stamp_ns = self._stamp_ns(msg.header.stamp)
+        if self._input_stamp_regressed(
+                'selected_path', stamp_ns, self.selected_path_stamp_ns):
+            return
         values = []
         for index, stamped in enumerate(msg.poses):
             pose = stamped.pose
@@ -278,6 +335,7 @@ class RouteFollower(Node):
             Waypoint(index, x, y, yaw, 1, float(self.p['avoidance_speed_mps']))
             for index, x, y, yaw in values)
         self.selected_path_signature = signature
+        self.selected_path_stamp_ns = stamp_ns
         self.selected_path_receive_time = self.get_clock().now()
         if self.state == 'STOPPED_FOR_REPLAN':
             self.state, self.reason = 'WAITING_FOR_AVOIDANCE_START', 'PATH_READY'
@@ -374,6 +432,7 @@ class RouteFollower(Node):
         self.avoidance_actual_path = PathMsg()
         self.state, self.reason = 'FOLLOWING_AVOIDANCE', ''
         self.control_source = 'LIDAR'
+        self.last_control_time = None
         self.get_logger().info('FOLLOWING_AVOIDANCE: LIDAR control source active')
         return True, 'selected avoidance path started'
 
@@ -416,13 +475,117 @@ class RouteFollower(Node):
         self._open_actual_log()
         self.get_logger().info('FOLLOWING: route replay control authority active')
 
+    def _safe_control(self):
+        """Never let an unexpected timer exception leave a stale command active."""
+        try:
+            self._control()
+        except Exception as exc:  # final safety boundary around the timer
+            self._publish_stop()
+            self.state, self.reason = 'ERROR', 'CONTROL_CALLBACK_EXCEPTION'
+            self.get_logger().error(f'CONTROL_CALLBACK_EXCEPTION: {exc!r}')
+            self._publish_status()
+
+    def _handle_time_jump(self, now, large, detail):
+        if self.state != 'TIME_RESET_STOP':
+            self.time_reset_resume_state = self.state
+        self.state, self.reason = 'TIME_RESET_STOP', detail
+        self.time_reset_is_large = self.time_reset_is_large or bool(large)
+        self.last_control_time = now
+        self.last_control_dt = None
+        self.last_clock_time = now
+        # Freshness is tied to an epoch. Preserve route/path objects and indices,
+        # but require new sensor samples before any command can be generated.
+        self.odom_receive_time = None
+        self.last_scan_receive_time = None
+        self.last_rear_scan_receive_time = None
+        self.selected_path_receive_time = None
+        self.avoidance_ready_since = None
+        self.transition_stop_cycles = 0
+        self.csv_rejoin_start_xy = None
+        self.start_time = None
+        self._publish_stop()
+        if not self.time_reset_logged:
+            level = 'large simulation reset; manual restart required' if large else (
+                'clock discontinuity; waiting for fresh odom/scans/exact TF')
+            self.get_logger().error(f'TIME_RESET_STOP: {detail}; {level}')
+            self.time_reset_logged = True
+
+    def _tf_is_valid(self):
+        if self.odom is None:
+            return False
+        try:
+            stamp = Time.from_msg(self.odom.header.stamp)
+            return self.tf_buffer.can_transform(
+                'odom', 'base_footprint', stamp,
+                timeout=Duration(seconds=float(self.p['tf_timeout_s'])))
+        except (TransformException, TypeError, ValueError):
+            return False
+
+    def _time_reset_recovery_ready(self):
+        if self.time_reset_is_large:
+            return False
+        required = (self.odom_receive_time, self.last_scan_receive_time,
+                    self.last_rear_scan_receive_time)
+        if any(value is None for value in required):
+            return False
+        if self.time_reset_resume_state in ('FOLLOWING_AVOIDANCE', 'REJOIN_ALIGNING'):
+            if self.selected_path_receive_time is None:
+                return False
+        return self._tf_is_valid()
+
     def _control(self):
         now = self.get_clock().now()
+        if self.last_control_time is None:
+            self.last_control_time = now
+            self.last_control_dt = None
+            self.last_clock_time = now
+            self._publish_stop()
+            self._publish_status()
+            return
+        delta_ns = (now-self.last_control_time).nanoseconds
+        if delta_ns <= 0:
+            backwards_ns = max(0, -delta_ns)
+            large = (backwards_ns >= int(
+                float(self.p['clock_reset_threshold_s'])*1e9))
+            self._handle_time_jump(
+                now, large, f'non-monotonic ROS time delta_ns={delta_ns}')
+            self._publish_status()
+            return
+        if delta_ns > int(float(self.p['clock_forward_jump_threshold_s'])*1e9):
+            self._handle_time_jump(
+                now, False, f'forward ROS time jump delta_ns={delta_ns}')
+            self._publish_status()
+            return
+        self.last_clock_time = now
+        dt = max(0.001, min(0.2, delta_ns/1e9))
+        self.last_control_dt = dt
+        self.last_control_time = now
+        if self.state == 'TIME_RESET_STOP':
+            self._publish_stop()
+            if self._time_reset_recovery_ready():
+                resume = self.time_reset_resume_state
+                if resume in STATES and resume != 'TIME_RESET_STOP':
+                    self.state, self.reason = resume, 'TIME_RECOVERED'
+                    self.time_reset_resume_state = None
+                    self.time_reset_logged = False
+                    self.get_logger().warning(
+                        'TIME_RECOVERED: fresh odom/scans and exact-stamp TF verified; '
+                        'one final zero cycle published')
+            self._publish_status()
+            return
         if self.odom is None:
             self._publish_stop()
             self._publish_status()
             return
+        if self.odom_receive_time is None:
+            self._publish_stop()
+            self._publish_status()
+            return
         odom_age = (now-self.odom_receive_time).nanoseconds/1e9
+        if odom_age < 0:
+            self._handle_time_jump(now, True, f'odom freshness age={odom_age:.6f}s')
+            self._publish_status()
+            return
         if odom_age > float(self.p['odom_timeout_s']):
             if self.state == 'FOLLOWING':
                 self._error('ODOMETRY_TIMEOUT', f'age={odom_age:.3f}s')
@@ -433,10 +596,20 @@ class RouteFollower(Node):
         if self.state == 'START_POSE_CHECK':
             if self._check_start() and self.start_requested:
                 self._begin_following()
+                self._publish_stop()
+                self._publish_status()
+                return
         elif self.state == 'READY' and self.start_requested:
             self._begin_following()
+            self._publish_stop()
+            self._publish_status()
+            return
         if self.state == 'WAITING_FOR_AVOIDANCE_START':
             self._try_auto_start_avoidance(now)
+            if self.state == 'FOLLOWING_AVOIDANCE':
+                self._publish_stop()
+                self._publish_status()
+                return
         if self.state == 'REJOINING_CSV':
             self._publish_stop()
             if self.transition_stop_cycles > 0:
@@ -467,9 +640,23 @@ class RouteFollower(Node):
             if self.last_scan_receive_time is None:
                 self._error('SCAN_TIMEOUT', 'no front scan received')
                 return
+            if self.last_rear_scan_receive_time is None:
+                self._error('SCAN_TIMEOUT', 'no rear scan received')
+                return
             scan_age = (now-self.last_scan_receive_time).nanoseconds/1e9
+            rear_scan_age = (now-self.last_rear_scan_receive_time).nanoseconds/1e9
             if scan_age > float(self.p['scan_timeout_s']):
                 self._error('SCAN_TIMEOUT', f'age={scan_age:.3f}s')
+                return
+            if rear_scan_age > float(self.p['scan_timeout_s']):
+                self._error('SCAN_TIMEOUT', f'rear age={rear_scan_age:.3f}s')
+                return
+            if scan_age < 0 or rear_scan_age < 0:
+                self._handle_time_jump(
+                    now, True, f'scan freshness front={scan_age:.6f} rear={rear_scan_age:.6f}')
+                return
+            if self.selected_path_receive_time is None:
+                self._publish_stop()
                 return
             path_age = (now-self.selected_path_receive_time).nanoseconds/1e9
             if path_age > float(self.p['selected_path_timeout_s']):
@@ -506,15 +693,8 @@ class RouteFollower(Node):
         else:
             self.segment = max(self.segment, result.nearest.segment)
         self.visited_indices.add(result.nearest_index)
-        reason = safety_reason(
-            odom_age, float(self.p['odom_timeout_s']), result.nearest.distance,
-            float(self.p['avoidance_max_cross_track_error_m'] if avoiding else
-                  self.p['max_cross_track_error_m']),
-            all(math.isfinite(value) for value in
-                (result.steering_rad, result.angular_rate, goal_distance)))
-        if reason:
-            self._error(reason, f'cross_track={result.nearest.distance:.3f}')
-            return
+        remaining_path = lateral = yaw_error = None
+        terminal = steering_ready = ready = False
         if avoiding:
             projection = nearest_projection(active_points, x, y,
                                             self.avoidance_segment)
@@ -522,11 +702,26 @@ class RouteFollower(Node):
             ready, remaining, lateral, yaw_error = avoidance_rejoin_ready(
                 x, y, yaw, goal, float(self.p['avoidance_rejoin_remaining_m']),
                 float(self.p['avoidance_rejoin_lateral_tolerance_m']),
-                math.radians(float(self.p['avoidance_rejoin_yaw_tolerance_deg'])))
+                math.radians(float(self.p['avoidance_rejoin_yaw_tolerance_deg'])),
+                float(self.p['avoidance_rejoin_max_overshoot_m']))
             terminal = remaining_path <= float(
                 self.p['avoidance_rejoin_alignment_distance_m'])
             steering_ready = abs(result.steering_rad) <= math.radians(
                 float(self.p['avoidance_rejoin_steering_tolerance_deg']))
+        # Past the final polyline point, nearest.distance includes harmless
+        # along-track overshoot.  The terminal tangent's lateral error is the
+        # actual cross-track safety quantity.
+        safety_cross_track = lateral if avoiding and terminal else result.nearest.distance
+        reason = safety_reason(
+            odom_age, float(self.p['odom_timeout_s']), safety_cross_track,
+            float(self.p['avoidance_max_cross_track_error_m'] if avoiding else
+                  self.p['max_cross_track_error_m']),
+            all(math.isfinite(value) for value in
+                (result.steering_rad, result.angular_rate, goal_distance)))
+        if reason:
+            self._error(reason, f'cross_track={safety_cross_track:.3f}')
+            return
+        if avoiding:
             if terminal and ready and steering_ready:
                 forward_indices = range(self.segment+1, len(self.points))
                 self.rejoin_index = min(
@@ -566,8 +761,6 @@ class RouteFollower(Node):
             self.get_logger().info(f'GOAL_REACHED: final distance={goal_distance:.3f} m')
             return
 
-        dt = max(0.001, min(0.2, (now-self.last_control_time).nanoseconds/1e9))
-        self.last_control_time = now
         distance_from_start = math.hypot(x-self.points[0].x, y-self.points[0].y)
         ramp_speed = min(
             float(self.p['cruise_speed_mps']),
@@ -844,7 +1037,9 @@ class RouteFollower(Node):
         print('[route_follower] METRICS ' + text, flush=True)
 
     def destroy_node(self):
-        self._publish_stop()
+        for _ in range(3):
+            self._publish_stop()
+            time.sleep(0.02)
         self._close_actual_log()
         if self.authority is not None:
             self.authority.close()

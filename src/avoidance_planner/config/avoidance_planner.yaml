@@ -51,7 +51,7 @@ avoidance_coordinator:
     path_sample_interval_m: 0.05
     collision_check_interval_m: 0.02
     return_transition_lengths_m: [2.0, 2.5, 3.0]
-    rejoin_straight_extension_m: 1.0
+    rejoin_straight_extension_m: 2.0
     corridor_candidate_fractions: [0.25, 0.50, 0.75, 0.80, 0.85, 0.90]
     marker_lifetime_sec: 2.0
     planning_rate_hz: 10.0

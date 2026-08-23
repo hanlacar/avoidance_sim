@@ -41,7 +41,7 @@ PLANNER_STATES = (
     'REPLAN_REQUIRED', 'STOPPING', 'STOPPED_FOR_PLANNING',
     'DETECTING_BOUNDARIES', 'BUILDING_CORRIDOR',
     'GENERATING_CANDIDATES', 'VALIDATING_CANDIDATES', 'PATH_READY',
-    'PATH_INFEASIBLE', 'DYNAMIC_OBSTACLE_STOP', 'ERROR')
+    'PATH_INFEASIBLE', 'DYNAMIC_OBSTACLE_STOP', 'TIME_RESET_STOP', 'ERROR')
 
 
 class AvoidanceCoordinator(Node):
@@ -90,6 +90,8 @@ class AvoidanceCoordinator(Node):
             'rejoin_straight_extension_m': 1.0,
             'corridor_candidate_fractions': [0.25, 0.50, 0.75, 0.80, 0.85, 0.90],
             'marker_lifetime_sec': 2.0, 'planning_rate_hz': 20.0,
+            'clock_forward_jump_threshold_s': 2.0,
+            'clock_reset_threshold_s': 1.0,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -172,6 +174,8 @@ class AvoidanceCoordinator(Node):
         self.reason = ''
         self.state_history = [self.state]
         self.odom = None
+        self.odom_receive_time = None
+        self.last_odom_stamp_ns = None
         self.route = ()
         self.route_nearest_index = 0
         self.tracks = ()
@@ -184,6 +188,8 @@ class AvoidanceCoordinator(Node):
         self.passed_track_ids = set()
         self.last_front_scan_time = None
         self.last_rear_scan_time = None
+        self.last_front_scan_stamp_ns = None
+        self.last_rear_scan_stamp_ns = None
         self.pending_scans = deque()
         self.tf_ready_frames = set()
         self.tf_ready = False
@@ -207,6 +213,10 @@ class AvoidanceCoordinator(Node):
         self.last_plan_summary = {}
         self.last_scan_wall = None
         self.last_scan_stamp = None
+        self.last_tick_time = None
+        self.time_reset_resume_state = None
+        self.time_reset_is_large = False
+        self.selected_path_msg = None
         self.last_cpu_wall = time.perf_counter()
         usage = resource.getrusage(resource.RUSAGE_SELF)
         self.last_cpu_seconds = usage.ru_utime+usage.ru_stime
@@ -246,7 +256,12 @@ class AvoidanceCoordinator(Node):
                           1.0-2.0*(q.y*q.y+q.z*q.z))
 
     def _odom(self, msg):
+        stamp_ns = Time.from_msg(msg.header.stamp).nanoseconds
+        if self._stamp_regressed('odom', stamp_ns, self.last_odom_stamp_ns):
+            return
+        self.last_odom_stamp_ns = stamp_ns
         self.odom = msg
+        self.odom_receive_time = self.get_clock().now()
 
     def _reference(self, msg):
         route = []
@@ -273,10 +288,20 @@ class AvoidanceCoordinator(Node):
                             f'avoidance complete for track={completed_track}')
 
     def _front_scan(self, scan):
+        stamp_ns = Time.from_msg(scan.header.stamp).nanoseconds
+        if self._stamp_regressed(
+                'scan_front', stamp_ns, self.last_front_scan_stamp_ns):
+            return
+        self.last_front_scan_stamp_ns = stamp_ns
         self.last_front_scan_time = self.get_clock().now()
         self._queue_scan(scan, True)
 
     def _rear_scan(self, scan):
+        stamp_ns = Time.from_msg(scan.header.stamp).nanoseconds
+        if self._stamp_regressed(
+                'scan_rear', stamp_ns, self.last_rear_scan_stamp_ns):
+            return
+        self.last_rear_scan_stamp_ns = stamp_ns
         self.last_rear_scan_time = self.get_clock().now()
         self._queue_scan(scan, False)
 
@@ -405,11 +430,73 @@ class AvoidanceCoordinator(Node):
         pose = self.odom.pose.pose
         return Pose2(pose.position.x, pose.position.y, self._yaw(pose.orientation))
 
+    def _stamp_regressed(self, source, stamp_ns, previous_ns):
+        if previous_ns is not None and stamp_ns < previous_ns:
+            self._handle_time_jump(
+                self.get_clock().now(), True,
+                f'{source} stamp regressed {previous_ns}->{stamp_ns}')
+            return True
+        return False
+
+    def _handle_time_jump(self, now, large, detail):
+        if self.state != 'TIME_RESET_STOP':
+            self.time_reset_resume_state = self.state
+        self.state, self.reason = 'TIME_RESET_STOP', detail
+        self.time_reset_is_large = self.time_reset_is_large or bool(large)
+        self.last_tick_time = now
+        self.odom_receive_time = None
+        self.last_front_scan_time = None
+        self.last_rear_scan_time = None
+        self.stopped_since = None
+        self.pending_scans.clear()
+        self.tf_ready_frames.clear()
+        self.tf_ready = False
+        self.last_scan_stamp = None
+        self.replan_pub.publish(Bool(data=True))
+        self.get_logger().error(
+            f'TIME_RESET_STOP: {detail}; '
+            f'{"manual restart required" if large else "waiting for fresh exact-stamp inputs"}')
+
+    def _time_reset_recovery_ready(self):
+        return (not self.time_reset_is_large and self.odom_receive_time is not None and
+                self.last_front_scan_time is not None and
+                self.last_rear_scan_time is not None and self.tf_ready)
+
     def _tick(self):
+        now = self.get_clock().now()
+        if self.last_tick_time is None:
+            self.last_tick_time = now
+        else:
+            delta_ns = (now-self.last_tick_time).nanoseconds
+            if delta_ns <= 0 or delta_ns > int(
+                    float(self.p['clock_forward_jump_threshold_s'])*1e9):
+                backwards_ns = max(0, -delta_ns)
+                large = backwards_ns >= int(
+                    float(self.p['clock_reset_threshold_s'])*1e9)
+                self._handle_time_jump(now, large, f'ROS time delta_ns={delta_ns}')
+                self._publish_status()
+                return
+            self.last_tick_time = now
         self._drain_scan_queue()
         self._update_cpu_usage()
         self._publish_stop_contract()
         self._watchdog()
+        if self.state == 'TIME_RESET_STOP':
+            if self._time_reset_recovery_ready():
+                resume = self.time_reset_resume_state or 'FOLLOWING_CSV'
+                self.state, self.reason = resume, 'TIME_RECOVERED'
+                self.time_reset_resume_state = None
+                self.replan_pub.publish(Bool(data=False))
+                if resume == 'PATH_READY' and self.selected_path_msg is not None:
+                    stamp = now.to_msg()
+                    self.selected_path_msg.header.stamp = stamp
+                    for pose in self.selected_path_msg.poses:
+                        pose.header.stamp = stamp
+                    self.selected_path_pub.publish(self.selected_path_msg)
+                self.get_logger().warning(
+                    'TIME_RECOVERED: fresh odom/front/rear scans and exact TF verified')
+            self._publish_status()
+            return
         if not self.tf_ready or self.odom is None or len(self.route) < 2:
             self._publish_status()
             return
@@ -434,8 +521,14 @@ class AvoidanceCoordinator(Node):
         if (self.state == 'DYNAMIC_OBSTACLE_STOP' and self.selected_track is not None and
                 self.selected_track.state == STATIC_OBSTACLE):
             self.debounce = ReplanDebounce(int(self.p['confirmation_frames']))
-            self._set_state('FOLLOWING_CSV',
-                            f'track={self.selected_track.track_id} stationary-confirmed')
+            # The follower already latched its stop on the dynamic hazard.  It
+            # cannot drive closer to re-enter the distance trigger, so promote
+            # the now-confirmed static track directly into stopped planning.
+            self.debounce.latched = True
+            detail = f'track={self.selected_track.track_id} stationary-confirmed'
+            self._set_state('REPLAN_REQUIRED', detail)
+            self.replan_pub.publish(Bool(data=True))
+            self._set_state('STOPPING', 'waiting for odom-confirmed stop')
         if self.state in ('PATH_READY', 'PATH_INFEASIBLE',
                           'DYNAMIC_OBSTACLE_STOP', 'ERROR'):
             self._publish_status()
@@ -618,7 +711,7 @@ class AvoidanceCoordinator(Node):
             'STOPPING', 'STOPPED_FOR_PLANNING', 'DETECTING_BOUNDARIES',
             'BUILDING_CORRIDOR', 'GENERATING_CANDIDATES',
             'VALIDATING_CANDIDATES', 'PATH_READY', 'PATH_INFEASIBLE',
-            'DYNAMIC_OBSTACLE_STOP', 'ERROR')
+            'DYNAMIC_OBSTACLE_STOP', 'TIME_RESET_STOP', 'ERROR')
         if active:
             self.replan_pub.publish(Bool(data=True))
 
@@ -716,6 +809,14 @@ class AvoidanceCoordinator(Node):
                 (math.degrees(item.max_steering_rad)
                  for item in result.candidates), default=0.0),
         }
+        if result.selected is not None:
+            self.last_plan_summary.update({
+                'selected_candidate_id': result.selected.candidate_id,
+                'selected_return_length_m': result.selected.return_length,
+                'selected_max_steering_deg': math.degrees(
+                    result.selected.max_steering_rad),
+                'selected_max_curvature_rate': result.selected.max_curvature_rate,
+            })
         self.planning_time_pub.publish(Float32(data=float(elapsed_ms)))
         obstacle = track_box(self.selected_track, float(self.p['minimum_obstacle_depth_m']))
         corridor = self._marker('safe_corridor', 0, Marker.CUBE)
@@ -783,6 +884,7 @@ class AvoidanceCoordinator(Node):
             self.max_curvature_pub.publish(Float32(data=math.nan))
             self.failure_pub.publish(String(data='NO_VALID_CANDIDATE'))
         self.selected_path_pub.publish(selected_path)
+        self.selected_path_msg = selected_path
         self.selected_track_pub.publish(Int32(data=self.selected_track.track_id))
 
     def _obstacle_statuses(self):
