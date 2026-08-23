@@ -59,13 +59,32 @@
     </link></model>
 
     <!-- 0.05 m high curbs immediately outside the road. -->
-    <model name="left_curb"><static>true</static><pose>15.0 1.325 0.025 0 0 0</pose><link name="curb">
+    <model name="left_curb"><static>true</static><pose>15.0 0.975 0.025 0 0 0</pose><link name="curb">
       <collision name="collision"><geometry><box><size>30.0 0.15 0.05</size></box></geometry></collision>
       <visual name="visual"><geometry><box><size>30.0 0.15 0.05</size></box></geometry><material><ambient>0.58 0.58 0.58 1</ambient><diffuse>0.62 0.62 0.62 1</diffuse></material></visual>
     </link></model>
-    <model name="right_curb"><static>true</static><pose>15.0 -1.325 0.025 0 0 0</pose><link name="curb">
+    <model name="right_curb"><static>true</static><pose>15.0 -0.975 0.025 0 0 0</pose><link name="curb">
       <collision name="collision"><geometry><box><size>30.0 0.15 0.05</size></box></geometry></collision>
       <visual name="visual"><geometry><box><size>30.0 0.15 0.05</size></box></geometry><material><ambient>0.58 0.58 0.58 1</ambient><diffuse>0.62 0.62 0.62 1</diffuse></material></visual>
     </link></model>
+
+    <!-- Positions and LEFT/RIGHT order are filled by the launch file before
+         Gazebo starts. Both boxes remain fully inside the white-line bounds. -->
+    <model name="obstacle_1">
+      <static>true</static>
+      <pose>__OBS1_X__ __OBS1_Y__ 0.075 0 0 0</pose>
+      <link name="box_link">
+        <collision name="collision"><geometry><box><size>0.65 0.39 0.15</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.65 0.39 0.15</size></box></geometry><material><ambient>0.72 0.18 0.08 1</ambient><diffuse>0.82 0.22 0.10 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="obstacle_2">
+      <static>true</static>
+      <pose>__OBS2_X__ __OBS2_Y__ 0.075 0 0 0</pose>
+      <link name="box_link">
+        <collision name="collision"><geometry><box><size>0.65 0.39 0.15</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.65 0.39 0.15</size></box></geometry><material><ambient>0.08 0.30 0.72 1</ambient><diffuse>0.10 0.38 0.88 1</diffuse></material></visual>
+      </link>
+    </model>
   </world>
 </sdf>

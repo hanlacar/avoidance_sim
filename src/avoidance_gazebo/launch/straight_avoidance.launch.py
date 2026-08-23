@@ -1,22 +1,56 @@
 import os
+import random
+import tempfile
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess, IncludeLaunchDescription, LogInfo, OpaqueFunction, TimerAction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, LogInfo, OpaqueFunction, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command
+from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
+
+
+def _obstacle_layout(seed):
+    rng = random.Random(seed)
+    first_x = rng.uniform(9.325, 15.675)
+    second_x = first_x + 5.0
+    first_left = bool(rng.getrandbits(1))
+    first_y = 0.585 if first_left else -0.585
+    second_y = -first_y
+    return first_x, first_y, second_x, second_y
 
 
 def _launch_course(context):
     pkg = get_package_share_directory('avoidance_gazebo')
     ros_gz_sim = get_package_share_directory('ros_gz_sim')
-    world_path = os.path.join(pkg, 'worlds', 'straight_avoidance.sdf')
+    template_path = os.path.join(pkg, 'worlds', 'straight_avoidance.sdf')
     xacro_file = os.path.join(pkg, 'urdf', 'turtle_car.urdf.xacro')
+
+    seed_text = LaunchConfiguration('random_seed').perform(context).strip()
+    seed = None if seed_text == '' else int(seed_text)
+    first_x, first_y, second_x, second_y = _obstacle_layout(seed)
+
+    with open(template_path, 'r', encoding='utf-8') as source:
+        world_text = source.read()
+    replacements = {
+        '__OBS1_X__': f'{first_x:.6f}',
+        '__OBS1_Y__': f'{first_y:.3f}',
+        '__OBS2_X__': f'{second_x:.6f}',
+        '__OBS2_Y__': f'{second_y:.3f}',
+    }
+    for placeholder, value in replacements.items():
+        world_text = world_text.replace(placeholder, value)
+
+    world_file = tempfile.NamedTemporaryFile(
+        mode='w', prefix='straight_avoidance_', suffix='.sdf',
+        encoding='utf-8', delete=False)
+    with world_file:
+        world_file.write(world_text)
+    generated_world = world_file.name
 
     gz = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(ros_gz_sim, 'launch', 'gz_sim.launch.py')),
-        launch_arguments={'gz_args': f'-r {world_path}'}.items(),
+        launch_arguments={'gz_args': f'-r {generated_world}'}.items(),
     )
 
     robot_description = Command(['xacro ', xacro_file])
@@ -50,8 +84,7 @@ def _launch_course(context):
     )
 
     return [
-        LogInfo(msg=f'[avoidance_gazebo] World: {world_path}'),
-        LogInfo(msg='[avoidance_gazebo] Obstacles: disabled'),
+        LogInfo(msg=f'[avoidance_gazebo] Generated world: {generated_world}'),
         LogInfo(msg='[avoidance_gazebo] Road: 30.00 m'),
         LogInfo(msg='[avoidance_gazebo] White-line inner width: 1.56 m'),
         LogInfo(msg='[avoidance_gazebo] Start: x=4.00 m'),
@@ -60,6 +93,14 @@ def _launch_course(context):
         LogInfo(msg='[avoidance_gazebo] Vehicle spawn: x=3.25 m, y=0.00 m, z=0.00 m, yaw=0.00 rad'),
         LogInfo(msg='[avoidance_gazebo] Front LiDAR: x=+0.65 m'),
         LogInfo(msg='[avoidance_gazebo] Rear LiDAR: x=-0.65 m'),
+        LogInfo(msg=(f'[avoidance_gazebo] Obstacle 1: '
+                     f'{"LEFT" if first_y > 0 else "RIGHT"}, '
+                     f'x={first_x:.2f}, y={first_y:+.3f}')),
+        LogInfo(msg=(f'[avoidance_gazebo] Obstacle 2: '
+                     f'{"LEFT" if second_y > 0 else "RIGHT"}, '
+                     f'x={second_x:.2f}, y={second_y:+.3f}')),
+        LogInfo(msg='[avoidance_gazebo] Center longitudinal gap: 5.00 m'),
+        LogInfo(msg=f'[avoidance_gazebo] Random seed: {seed_text or "system-random"}'),
         gz,
         rsp,
         bridge,
@@ -69,5 +110,8 @@ def _launch_course(context):
 
 def generate_launch_description():
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'random_seed', default_value='',
+            description='Optional integer seed for reproducible obstacle layout.'),
         OpaqueFunction(function=_launch_course),
     ])
