@@ -14,6 +14,7 @@
     </plugin>
 
     <gravity>0 0 -9.81</gravity>
+
     <scene>
       <ambient>0.65 0.65 0.65 1</ambient>
       <background>0.78 0.85 0.92 1</background>
@@ -32,59 +33,285 @@
     <model name="road">
       <static>true</static>
       <pose>15.0 0 -0.025 0 0 0</pose>
+
       <link name="road_link">
-        <collision name="road_collision"><geometry><box><size>30.0 2.50 0.05</size></box></geometry></collision>
+        <collision name="road_collision">
+          <geometry>
+            <box>
+              <size>30.0 2.50 0.05</size>
+            </box>
+          </geometry>
+        </collision>
+
         <visual name="road_visual">
-          <geometry><box><size>30.0 2.50 0.05</size></box></geometry>
-          <material><ambient>0.12 0.12 0.12 1</ambient><diffuse>0.14 0.14 0.14 1</diffuse><roughness><metalness>0</metalness><roughness>0.95</roughness></roughness></material>
+          <geometry>
+            <box>
+              <size>30.0 2.50 0.05</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>0.12 0.12 0.12 1</ambient>
+            <diffuse>0.14 0.14 0.14 1</diffuse>
+            <roughness>
+              <metalness>0</metalness>
+              <roughness>0.95</roughness>
+            </roughness>
+          </material>
         </visual>
       </link>
     </model>
 
-    <model name="yellow_lines"><static>true</static><link name="lines">
-      <visual name="left_yellow"><pose>15.0 1.0475 0.006 0 0 0</pose><geometry><box><size>30.0 0.035 0.008</size></box></geometry><material><ambient>1 0.72 0 1</ambient><diffuse>1 0.72 0 1</diffuse></material></visual>
-      <visual name="right_yellow"><pose>15.0 -1.0475 0.006 0 0 0</pose><geometry><box><size>30.0 0.035 0.008</size></box></geometry><material><ambient>1 0.72 0 1</ambient><diffuse>1 0.72 0 1</diffuse></material></visual>
-    </link></model>
+    <!-- Yellow edge lines -->
+    <model name="yellow_lines">
+      <static>true</static>
 
-    <model name="white_edge_lines"><static>true</static><link name="lines">
-      <!-- Line thickness is 0.025 m: centres at +/-0.9875 put the inner edges at +/-0.9750. -->
-      <visual name="left_white"><pose>15.0 0.9875 0.007 0 0 0</pose><geometry><box><size>30.0 0.025 0.009</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
-      <visual name="right_white"><pose>15.0 -0.9875 0.007 0 0 0</pose><geometry><box><size>30.0 0.025 0.009</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
-    </link></model>
+      <link name="lines">
+        <visual name="left_yellow">
+          <pose>15.0 1.0475 0.006 0 0 0</pose>
 
-    <!-- Start and finish are visual-only and exactly 22.0 m apart. -->
-    <model name="start_finish"><static>true</static><link name="lines">
-      <visual name="start"><pose>4.00 0 0.009 0 0 0</pose><geometry><box><size>0.05 1.95 0.012</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
-      <visual name="finish"><pose>26.00 0 0.009 0 0 0</pose><geometry><box><size>0.05 1.95 0.012</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
-    </link></model>
+          <geometry>
+            <box>
+              <size>30.0 0.035 0.008</size>
+            </box>
+          </geometry>
 
-    <!-- 0.05 m high curbs immediately outside the road. -->
-    <model name="left_curb"><static>true</static><pose>15.0 1.170 0.025 0 0 0</pose><link name="curb">
-      <collision name="collision"><geometry><box><size>30.0 0.15 0.05</size></box></geometry></collision>
-      <visual name="visual"><geometry><box><size>30.0 0.15 0.05</size></box></geometry><material><ambient>0.58 0.58 0.58 1</ambient><diffuse>0.62 0.62 0.62 1</diffuse></material></visual>
-    </link></model>
-    <model name="right_curb"><static>true</static><pose>15.0 -1.170 0.025 0 0 0</pose><link name="curb">
-      <collision name="collision"><geometry><box><size>30.0 0.15 0.05</size></box></geometry></collision>
-      <visual name="visual"><geometry><box><size>30.0 0.15 0.05</size></box></geometry><material><ambient>0.58 0.58 0.58 1</ambient><diffuse>0.62 0.62 0.62 1</diffuse></material></visual>
-    </link></model>
+          <material>
+            <ambient>1 0.72 0 1</ambient>
+            <diffuse>1 0.72 0 1</diffuse>
+          </material>
+        </visual>
 
-    <!-- Positions and LEFT/RIGHT order are filled by the launch file before
-         Gazebo starts. Both boxes remain fully inside the white-line bounds. -->
+        <visual name="right_yellow">
+          <pose>15.0 -1.0475 0.006 0 0 0</pose>
+
+          <geometry>
+            <box>
+              <size>30.0 0.035 0.008</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>1 0.72 0 1</ambient>
+            <diffuse>1 0.72 0 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!--
+      White-line inner width = 1.95 m.
+      Vehicle width = 0.78 m.
+      0.78 x 2.5 = 1.95 m.
+
+      White line thickness = 0.025 m.
+      Centres at +/-0.9875 place the inner edges at +/-0.9750 m.
+    -->
+    <model name="white_edge_lines">
+      <static>true</static>
+
+      <link name="lines">
+        <visual name="left_white">
+          <pose>15.0 0.9875 0.007 0 0 0</pose>
+
+          <geometry>
+            <box>
+              <size>30.0 0.025 0.009</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>1 1 1 1</ambient>
+            <diffuse>1 1 1 1</diffuse>
+          </material>
+        </visual>
+
+        <visual name="right_white">
+          <pose>15.0 -0.9875 0.007 0 0 0</pose>
+
+          <geometry>
+            <box>
+              <size>30.0 0.025 0.009</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>1 1 1 1</ambient>
+            <diffuse>1 1 1 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!--
+      Road start       = x 0.0
+      Start line       = x 4.0
+      Finish line      = x 26.0
+      Road end         = x 30.0
+
+      Start to finish  = 22.0 m
+    -->
+    <model name="start_finish">
+      <static>true</static>
+
+      <link name="lines">
+        <visual name="start">
+          <pose>4.00 0 0.009 0 0 0</pose>
+
+          <geometry>
+            <box>
+              <size>0.05 1.95 0.012</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>1 1 1 1</ambient>
+            <diffuse>1 1 1 1</diffuse>
+          </material>
+        </visual>
+
+        <visual name="finish">
+          <pose>26.00 0 0.009 0 0 0</pose>
+
+          <geometry>
+            <box>
+              <size>0.05 1.95 0.012</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>1 1 1 1</ambient>
+            <diffuse>1 1 1 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!--
+      Curbs:
+      height = 0.18 m
+      centre Z = 0.09 m
+
+      LiDAR centre height = 0.12 m,
+      therefore the 2D LiDAR scan plane intersects the curb collision.
+    -->
+
+    <model name="left_curb">
+      <static>true</static>
+      <pose>15.0 1.170 0.09 0 0 0</pose>
+
+      <link name="curb">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>30.0 0.15 0.18</size>
+            </box>
+          </geometry>
+        </collision>
+
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>30.0 0.15 0.18</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>0.58 0.58 0.58 1</ambient>
+            <diffuse>0.62 0.62 0.62 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="right_curb">
+      <static>true</static>
+      <pose>15.0 -1.170 0.09 0 0 0</pose>
+
+      <link name="curb">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>30.0 0.15 0.18</size>
+            </box>
+          </geometry>
+        </collision>
+
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>30.0 0.15 0.18</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>0.58 0.58 0.58 1</ambient>
+            <diffuse>0.62 0.62 0.62 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!--
+      Obstacle positions and LEFT / RIGHT order are filled by the
+      launch file before Gazebo starts.
+    -->
+
     <model name="obstacle_1">
       <static>true</static>
       <pose>__OBS1_X__ __OBS1_Y__ 0.075 0 0 0</pose>
+
       <link name="box_link">
-        <collision name="collision"><geometry><box><size>0.65 0.39 0.15</size></box></geometry></collision>
-        <visual name="visual"><geometry><box><size>0.65 0.39 0.15</size></box></geometry><material><ambient>0.72 0.18 0.08 1</ambient><diffuse>0.82 0.22 0.10 1</diffuse></material></visual>
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.65 0.39 0.15</size>
+            </box>
+          </geometry>
+        </collision>
+
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.65 0.39 0.15</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>0.72 0.18 0.08 1</ambient>
+            <diffuse>0.82 0.22 0.10 1</diffuse>
+          </material>
+        </visual>
       </link>
     </model>
+
     <model name="obstacle_2">
       <static>true</static>
       <pose>__OBS2_X__ __OBS2_Y__ 0.075 0 0 0</pose>
+
       <link name="box_link">
-        <collision name="collision"><geometry><box><size>0.65 0.39 0.15</size></box></geometry></collision>
-        <visual name="visual"><geometry><box><size>0.65 0.39 0.15</size></box></geometry><material><ambient>0.08 0.30 0.72 1</ambient><diffuse>0.10 0.38 0.88 1</diffuse></material></visual>
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.65 0.39 0.15</size>
+            </box>
+          </geometry>
+        </collision>
+
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.65 0.39 0.15</size>
+            </box>
+          </geometry>
+
+          <material>
+            <ambient>0.08 0.30 0.72 1</ambient>
+            <diffuse>0.10 0.38 0.88 1</diffuse>
+          </material>
+        </visual>
       </link>
     </model>
+
   </world>
 </sdf>
