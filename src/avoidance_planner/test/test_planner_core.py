@@ -86,6 +86,17 @@ def test_consecutive_frames_confirm_static_obstacle():
     assert result[0].state == STATIC_OBSTACLE
 
 
+def test_new_track_does_not_use_first_velocity_for_dynamic_state():
+    manager = TrackManager(association_distance=1.0, alpha=1.0,
+                           dynamic_enter=0.15, dynamic_frames=1,
+                           dynamic_min_observations=3, static_frames=5)
+    for index, x in enumerate((2.0, 2.03)):
+        result = manager.update(
+            [adaptive_clusters(scan_points(x=x), 4, 0.08, 0.1, 0.2, 8.0)[0]],
+            index*0.1)
+    assert result[0].state == 'UNCONFIRMED'
+
+
 def test_consistent_motion_confirms_dynamic_obstacle():
     manager = TrackManager(association_distance=1.0, alpha=1.0,
                            dynamic_enter=0.15, dynamic_frames=3,
@@ -101,7 +112,7 @@ def test_dynamic_to_static_hysteresis_requires_multiple_frames():
     manager = TrackManager(association_distance=1.0, alpha=1.0,
                            dynamic_enter=0.15, dynamic_exit=0.08,
                            dynamic_frames=2, static_frames=3)
-    for index, x in enumerate((2.0, 2.03, 2.06)):
+    for index, x in enumerate((2.0, 2.03, 2.06, 2.09)):
         result = manager.update(
             [adaptive_clusters(scan_points(x=x), 4, 0.08, 0.1, 0.2, 8.0)[0]],
             index*0.1)
@@ -111,6 +122,8 @@ def test_dynamic_to_static_hysteresis_requires_multiple_frames():
     manager.update([stationary], 0.4)
     assert manager.tracks[1].state == DYNAMIC_OBSTACLE
     manager.update([stationary], 0.5)
+    assert manager.tracks[1].state == DYNAMIC_OBSTACLE
+    manager.update([stationary], 0.6)
     assert manager.tracks[1].state == STATIC_OBSTACLE
 
 
@@ -234,14 +247,14 @@ def test_multiple_candidate_paths_are_generated():
     assert len(result.candidates) == 18
 
 
-def test_dense_corridor_edge_sampling_recovers_twenty_degree_candidate():
+def test_dense_corridor_edge_sampling_recovers_twenty_five_degree_candidate():
     route = tuple(Pose2(index*0.1, 0.0, 0.0) for index in range(216))
     result = plan_candidates(
         route, Pose2(14.0622257, 0.0479746, -0.0489444),
         Box2(16.4647, 17.1147, 0.56179645, 0.823), 1.095, -1.095,
         target_fractions=(0.25, 0.50, 0.75, 0.80, 0.85, 0.90))
     assert result.selected is not None
-    assert result.selected.max_steering_rad <= math.radians(20.0)
+    assert result.selected.max_steering_rad <= math.radians(25.0)
     assert result.selected.obstacle_clearance > 0.20
     assert result.selected.curb_clearance > 0.0
 
@@ -259,6 +272,15 @@ def test_candidate_heading_is_continuous_at_start_and_return():
     assert selected.path[-1].yaw == pytest.approx(0.0, abs=1.0e-4)
 
 
+def test_candidate_has_straight_csv_rejoin_extension():
+    selected = nominal_plan().selected
+    terminal, previous = selected.path[-1], selected.path[-2]
+    assert terminal.x > previous.x
+    assert abs(terminal.y-previous.y) < 1.0e-6
+    assert all(abs(pose.y) < 1.0e-6 for pose in selected.path[-21:])
+    assert terminal.yaw == pytest.approx(0.0, abs=1.0e-4)
+
+
 def test_curvature_and_steering_use_bicycle_model():
     selected = nominal_plan().selected
     curvature = path_curvatures(selected.path)
@@ -267,18 +289,27 @@ def test_curvature_and_steering_use_bicycle_model():
     assert max(abs(value) for value in steering) == pytest.approx(selected.max_steering_rad)
 
 
-def test_candidates_over_twenty_degrees_are_discarded_not_clamped():
+def test_candidates_over_twenty_five_degrees_are_discarded_not_clamped():
     result = nominal_plan()
     rejected = [item for item in result.candidates
                 if item.reason == 'STEERING_LIMIT_EXCEEDED']
-    assert rejected and all(item.max_steering_rad > math.radians(20) for item in rejected)
-    assert result.selected.max_steering_rad < math.radians(20)
+    assert rejected and all(item.max_steering_rad > math.radians(25) for item in rejected)
+    assert result.selected.max_steering_rad < math.radians(25)
+
+
+def test_minimum_turn_radius_and_curvature_bound_match_twenty_five_degrees():
+    wheelbase = 0.77
+    r_min = wheelbase/math.tan(math.radians(25.0))
+    assert r_min == pytest.approx(1.651, abs=1.0e-3)
+    curvature_bound = math.tan(math.radians(25.0))/wheelbase
+    assert curvature_bound == pytest.approx(0.6056, abs=1.0e-3)
+    assert curvature_bound == pytest.approx(1.0/r_min)
 
 
 def test_selected_path_respects_minimum_turn_radius():
     selected = nominal_plan().selected
     radius = 1.0/selected.max_curvature
-    assert radius >= 0.77/math.tan(math.radians(20))
+    assert radius >= 0.77/math.tan(math.radians(25))
 
 
 def test_selected_path_has_positive_obstacle_and_curb_clearance():

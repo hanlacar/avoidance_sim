@@ -187,6 +187,26 @@ Visualization Manager:
       Enabled: true
       Topic:
         Value: /avoidance/planner_status_marker
+    - Class: rviz_default_plugins/Marker
+      Name: CSV Traveled
+      Enabled: true
+      Topic:
+        Value: /avoidance/route/traveled_marker
+    - Class: rviz_default_plugins/Marker
+      Name: CSV Remaining
+      Enabled: true
+      Topic:
+        Value: /avoidance/route/remaining_marker
+    - Class: rviz_default_plugins/Marker
+      Name: CSV Rejoin Point
+      Enabled: true
+      Topic:
+        Value: /avoidance/route/rejoin_marker
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Obstacle Status
+      Enabled: true
+      Topic:
+        Value: /avoidance/obstacle_status
   Tools:
     - Class: rviz_default_plugins/Interact
     - Class: rviz_default_plugins/MoveCamera

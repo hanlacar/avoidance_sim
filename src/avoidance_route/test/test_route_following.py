@@ -200,6 +200,64 @@ def test_follower_rejects_unclamped_over_limit_control():
                         math.radians(20), 0.0, math.radians(2))
 
 
+def test_attempt_avoidance_start_succeeds_when_path_ready(tmp_path):
+    from nav_msgs.msg import Path as PathMsg
+    from rclpy.time import Time
+    clock = SimpleNamespace(now=lambda: Time(nanoseconds=1_000_000_000))
+    fake = SimpleNamespace(
+        state='WAITING_FOR_AVOIDANCE_START', planner_state='PATH_READY',
+        selected_points=(Waypoint(0, 0.0, 0.0, 0.0, 1, 1.0),
+                         Waypoint(1, 1.0, 0.0, 0.0, 1, 1.0)),
+        selected_path_receive_time=Time(nanoseconds=0),
+        p={'selected_path_timeout_s': 300.0}, odom=Mock(),
+        get_clock=lambda: clock, selected_track_id=3,
+        avoidance_segment=99, steering=1.0, speed=1.0,
+        avoidance_track_id=-1, avoidance_actual_path=PathMsg(),
+        control_source='STOP',
+        _publish_stop=Mock(), get_logger=lambda: Mock(),
+        _pose=lambda: (0.0, 0.0, 0.0))
+    ok, message = RouteFollower._attempt_avoidance_start(fake)
+    assert ok and fake.state == 'FOLLOWING_AVOIDANCE'
+    assert fake.control_source == 'LIDAR'
+    assert fake.avoidance_track_id == 3
+    assert fake.avoidance_segment == 0
+
+
+def test_attempt_avoidance_start_fails_without_path_ready():
+    fake = SimpleNamespace(
+        state='WAITING_FOR_AVOIDANCE_START', planner_state='PLANNING',
+        selected_points=(), _publish_stop=Mock())
+    ok, message = RouteFollower._attempt_avoidance_start(fake)
+    assert not ok and 'unavailable' in message
+
+
+def test_auto_start_holds_then_starts_without_manual_service():
+    from rclpy.time import Time
+    calls = []
+    fake = SimpleNamespace(
+        p={'auto_start_avoidance': True, 'path_ready_hold_sec': 0.30},
+        state='WAITING_FOR_AVOIDANCE_START',
+        avoidance_ready_since=Time(nanoseconds=0),
+        avoidance_auto_start_failure_logged=False,
+        _attempt_avoidance_start=lambda: calls.append(1) or (True, 'ok'))
+    RouteFollower._try_auto_start_avoidance(fake, Time(nanoseconds=100_000_000))
+    assert calls == []
+    RouteFollower._try_auto_start_avoidance(fake, Time(nanoseconds=400_000_000))
+    assert calls == [1]
+    assert fake.avoidance_ready_since is None
+
+
+def test_auto_start_disabled_never_calls_attempt():
+    from rclpy.time import Time
+    fake = SimpleNamespace(
+        p={'auto_start_avoidance': False, 'path_ready_hold_sec': 0.30},
+        state='WAITING_FOR_AVOIDANCE_START',
+        avoidance_ready_since=Time(nanoseconds=0),
+        _attempt_avoidance_start=Mock())
+    RouteFollower._try_auto_start_avoidance(fake, Time(nanoseconds=10_000_000_000))
+    fake._attempt_avoidance_start.assert_not_called()
+
+
 def test_avoidance_rejoin_requires_forward_continuous_csv_join():
     goal = Waypoint(100, 8.83, 0.0, 0.0, 1, 1.0)
     ready, remaining, lateral, yaw_error = avoidance_rejoin_ready(

@@ -22,7 +22,7 @@ from visualization_msgs.msg import Marker
 from .authority import CommandAuthority, CommandAuthorityError
 from .route_following import (
     RouteError, Waypoint, avoidance_rejoin_ready, compute_control,
-    load_route_csv, normalize_angle,
+    load_route_csv, nearest_projection, normalize_angle, path_remaining,
     route_length, safety_reason, start_pose_matches)
 from .route_io import non_overwriting_path
 
@@ -30,7 +30,8 @@ from .route_io import non_overwriting_path
 STATES = ('WAITING_FOR_ODOM', 'WAITING_FOR_ROUTE', 'START_POSE_CHECK',
           'READY', 'FOLLOWING', 'GOAL_REACHED', 'STOPPED',
           'STOPPED_FOR_REPLAN', 'WAITING_FOR_AVOIDANCE_START',
-          'FOLLOWING_AVOIDANCE', 'REJOINING_CSV', 'ERROR')
+          'FOLLOWING_AVOIDANCE', 'REJOINING_CSV', 'REJOIN_ALIGNING',
+          'REJOIN_FAILED', 'ERROR')
 
 
 class RouteFollower(Node):
@@ -40,7 +41,7 @@ class RouteFollower(Node):
             'route_file': '', 'odom_topic': '/odom', 'cmd_topic': '/cmd_vel',
             'auto_start': False, 'obstacles_enabled': False,
             'lookahead_m': 1.20, 'wheelbase_m': 0.77,
-            'cruise_speed_mps': 1.0, 'max_steering_deg': 20.0,
+            'cruise_speed_mps': 1.0, 'max_steering_deg': 25.0,
             'max_steering_change_deg_per_cycle': 2.0,
             'acceleration_limit_mps2': 0.8, 'goal_tolerance_m': 0.10,
             'start_position_tolerance_m': 0.30,
@@ -54,15 +55,20 @@ class RouteFollower(Node):
             'selected_path_topic': '/avoidance/selected_path',
             'selected_path_timeout_s': 300.0,
             'avoidance_speed_mps': 1.0,
+            'rejoin_approach_speed_mps': 0.5,
             'avoidance_lookahead_m': 1.2,
             'avoidance_max_cross_track_error_m': 0.20,
             'avoidance_rejoin_remaining_m': 0.80,
-            'avoidance_rejoin_lateral_tolerance_m': 0.15,
-            'avoidance_rejoin_yaw_tolerance_deg': 12.0,
+            'avoidance_rejoin_lateral_tolerance_m': 0.10,
+            'avoidance_rejoin_yaw_tolerance_deg': 2.0,
+            'avoidance_rejoin_steering_tolerance_deg': 2.0,
+            'avoidance_rejoin_alignment_distance_m': 1.0,
             'csv_rejoin_lookahead_m': 2.0,
             'csv_rejoin_recovery_distance_m': 6.0,
             'gps_drive_level': 2.0,
             'scan_timeout_s': 0.30,
+            'auto_start_avoidance': True,
+            'path_ready_hold_sec': 0.30,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -90,6 +96,12 @@ class RouteFollower(Node):
         self.segment_marker_pub = self.create_publisher(Marker, '/avoidance/route/segment_marker', 10)
         self.goal_marker_pub = self.create_publisher(Marker, '/avoidance/route/goal_marker', qos)
         self.status_marker_pub = self.create_publisher(Marker, '/avoidance/route/status_marker', 10)
+        self.traveled_marker_pub = self.create_publisher(
+            Marker, '/avoidance/route/traveled_marker', 10)
+        self.remaining_marker_pub = self.create_publisher(
+            Marker, '/avoidance/route/remaining_marker', 10)
+        self.rejoin_marker_pub = self.create_publisher(
+            Marker, '/avoidance/route/rejoin_marker', qos)
         self.start_service = self.create_service(Trigger, '/avoidance/route/start', self._start)
         self.stop_service = self.create_service(Trigger, '/avoidance/route/stop', self._stop_service)
         self.global_stop_service = self.create_service(
@@ -135,6 +147,8 @@ class RouteFollower(Node):
         self.replan_ignore_until_clear = False
         self.csv_rejoin_recovery = False
         self.csv_rejoin_start_xy = None
+        self.avoidance_ready_since = None
+        self.avoidance_auto_start_failure_logged = False
         self.authority = None
         try:
             self.authority = CommandAuthority('route_follower')
@@ -194,9 +208,11 @@ class RouteFollower(Node):
             self.state = 'START_POSE_CHECK'
         if self.state in ('READY', 'FOLLOWING', 'GOAL_REACHED', 'STOPPED',
                           'STOPPED_FOR_REPLAN', 'WAITING_FOR_AVOIDANCE_START',
-                          'FOLLOWING_AVOIDANCE', 'REJOINING_CSV'):
+                          'FOLLOWING_AVOIDANCE', 'REJOINING_CSV',
+                          'REJOIN_ALIGNING'):
             self._append_actual(msg)
-        if self.state in ('FOLLOWING_AVOIDANCE', 'REJOINING_CSV'):
+        if self.state in ('FOLLOWING_AVOIDANCE', 'REJOINING_CSV',
+                  'REJOIN_ALIGNING'):
             self._append_avoidance_actual(msg)
 
     def _scan(self, _msg):
@@ -211,7 +227,8 @@ class RouteFollower(Node):
         if self.replan_ignore_until_clear:
             return
         if self.state in ('STOPPED_FOR_REPLAN', 'WAITING_FOR_AVOIDANCE_START',
-                          'FOLLOWING_AVOIDANCE', 'REJOINING_CSV'):
+                          'FOLLOWING_AVOIDANCE', 'REJOINING_CSV',
+                          'REJOIN_ALIGNING'):
             if self.state in ('STOPPED_FOR_REPLAN', 'WAITING_FOR_AVOIDANCE_START'):
                 self._publish_stop()
             return
@@ -264,9 +281,11 @@ class RouteFollower(Node):
         self.selected_path_receive_time = self.get_clock().now()
         if self.state == 'STOPPED_FOR_REPLAN':
             self.state, self.reason = 'WAITING_FOR_AVOIDANCE_START', 'PATH_READY'
+            self.avoidance_ready_since = self.get_clock().now()
+            self.avoidance_auto_start_failure_logged = False
             self._publish_stop()
             self.get_logger().info(
-                'WAITING_FOR_AVOIDANCE_START: explicit service approval required')
+                'WAITING_FOR_AVOIDANCE_START: path_ready_hold_sec countdown started')
 
     def _pose(self):
         pose = self.odom.pose.pose
@@ -333,33 +352,51 @@ class RouteFollower(Node):
         response.success, response.message = True, 'route replay started'
         return response
 
-    def _start_selected_path(self, _request, response):
+    def _attempt_avoidance_start(self):
+        """Shared gate used by both the auto-start timer and the manual
+        debug service. Returns (ok, message); never forces a start."""
         self._publish_stop()
         if self.state != 'WAITING_FOR_AVOIDANCE_START':
-            response.success, response.message = False, f'not ready: {self.state}'
-            return response
+            return False, f'not ready: {self.state}'
         if self.planner_state != 'PATH_READY' or len(self.selected_points) < 2:
-            response.success, response.message = False, 'selected path is unavailable'
-            return response
+            return False, 'selected path is unavailable'
         age = (self.get_clock().now()-self.selected_path_receive_time).nanoseconds/1e9
         if age > float(self.p['selected_path_timeout_s']):
-            response.success, response.message = False, f'selected path stale: {age:.3f}s'
-            return response
+            return False, f'selected path stale: {age:.3f}s'
         if self.odom is None:
-            response.success, response.message = False, 'odometry unavailable'
-            return response
+            return False, 'odometry unavailable'
         x, y, _ = self._pose()
         if math.hypot(x-self.selected_points[0].x, y-self.selected_points[0].y) > 0.35:
-            response.success, response.message = False, 'selected path start mismatch'
-            return response
+            return False, 'selected path start mismatch'
         self.avoidance_segment = 0
         self.steering = self.speed = 0.0
         self.avoidance_track_id = self.selected_track_id
+        self.avoidance_actual_path = PathMsg()
         self.state, self.reason = 'FOLLOWING_AVOIDANCE', ''
         self.control_source = 'LIDAR'
-        response.success, response.message = True, 'selected avoidance path started'
         self.get_logger().info('FOLLOWING_AVOIDANCE: LIDAR control source active')
+        return True, 'selected avoidance path started'
+
+    def _start_selected_path(self, _request, response):
+        response.success, response.message = self._attempt_avoidance_start()
         return response
+
+    def _try_auto_start_avoidance(self, now):
+        if not bool(self.p['auto_start_avoidance']):
+            return
+        if self.state != 'WAITING_FOR_AVOIDANCE_START' or self.avoidance_ready_since is None:
+            return
+        held = (now-self.avoidance_ready_since).nanoseconds/1e9
+        if held < float(self.p['path_ready_hold_sec']):
+            return
+        ok, message = self._attempt_avoidance_start()
+        if ok:
+            self.avoidance_ready_since = None
+            self.avoidance_auto_start_failure_logged = False
+        elif not self.avoidance_auto_start_failure_logged:
+            self.avoidance_auto_start_failure_logged = True
+            self.get_logger().warning(
+                f'AUTO_START_AVOIDANCE_BLOCKED: {message}; remaining stopped')
 
     def _stop_service(self, _request, response):
         self.state, self.reason = 'STOPPED', 'USER_STOP'
@@ -398,6 +435,8 @@ class RouteFollower(Node):
                 self._begin_following()
         elif self.state == 'READY' and self.start_requested:
             self._begin_following()
+        if self.state == 'WAITING_FOR_AVOIDANCE_START':
+            self._try_auto_start_avoidance(now)
         if self.state == 'REJOINING_CSV':
             self._publish_stop()
             if self.transition_stop_cycles > 0:
@@ -412,7 +451,8 @@ class RouteFollower(Node):
             self.csv_rejoin_start_xy = self._pose()[:2]
             self.last_control_time = now
             self.get_logger().info(f'FOLLOWING_CSV: rejoined at index {self.segment}')
-        if self.state not in ('FOLLOWING', 'FOLLOWING_AVOIDANCE'):
+        if self.state not in ('FOLLOWING', 'FOLLOWING_AVOIDANCE',
+                      'REJOIN_ALIGNING'):
             self._publish_stop()
             self._publish_status()
             return
@@ -422,7 +462,7 @@ class RouteFollower(Node):
             self._error('COMMAND_AUTHORITY_CONFLICT', ', '.join(conflicts))
             return
 
-        avoiding = self.state == 'FOLLOWING_AVOIDANCE'
+        avoiding = self.state in ('FOLLOWING_AVOIDANCE', 'REJOIN_ALIGNING')
         if avoiding:
             if self.last_scan_receive_time is None:
                 self._error('SCAN_TIMEOUT', 'no front scan received')
@@ -447,23 +487,6 @@ class RouteFollower(Node):
                 self.get_logger().info('CSV_REJOIN_RECOVERY_COMPLETE')
         goal = active_points[-1]
         goal_distance = math.hypot(goal.x-x, goal.y-y)
-        if avoiding:
-            ready, remaining, lateral, yaw_error = avoidance_rejoin_ready(
-                x, y, yaw, goal, float(self.p['avoidance_rejoin_remaining_m']),
-                float(self.p['avoidance_rejoin_lateral_tolerance_m']),
-                math.radians(float(self.p['avoidance_rejoin_yaw_tolerance_deg'])))
-            if ready:
-                self.rejoin_index = max(
-                    self.segment, min(range(self.segment, len(self.points)),
-                                      key=lambda i: math.hypot(
-                                          self.points[i].x-x, self.points[i].y-y)))
-                self.state, self.reason = 'REJOINING_CSV', f'index={self.rejoin_index}'
-                self.transition_stop_cycles = 1
-                self._publish_stop()
-                self.get_logger().info(
-                    f'REJOINING_CSV: continuous join, remaining={remaining:.3f} m, '
-                    f'lateral={lateral:.3f} m, yaw_error={math.degrees(yaw_error):.3f} deg')
-                return
         try:
             csv_lookahead = (float(self.p['csv_rejoin_lookahead_m'])
                              if self.csv_rejoin_recovery else
@@ -492,17 +515,47 @@ class RouteFollower(Node):
         if reason:
             self._error(reason, f'cross_track={result.nearest.distance:.3f}')
             return
-        if avoiding and goal_distance <= float(self.p['goal_tolerance_m']):
-            self.rejoin_index = max(
-                self.segment, min(range(self.segment, len(self.points)),
-                                  key=lambda i: math.hypot(
-                                      self.points[i].x-x, self.points[i].y-y)))
-            self.state, self.reason = 'REJOINING_CSV', f'index={self.rejoin_index}'
-            self.transition_stop_cycles = 1
-            self._publish_stop()
-            self.get_logger().info(
-                f'REJOINING_CSV: stop transition before index {self.rejoin_index}')
-            return
+        if avoiding:
+            projection = nearest_projection(active_points, x, y,
+                                            self.avoidance_segment)
+            remaining_path = path_remaining(active_points, projection)
+            ready, remaining, lateral, yaw_error = avoidance_rejoin_ready(
+                x, y, yaw, goal, float(self.p['avoidance_rejoin_remaining_m']),
+                float(self.p['avoidance_rejoin_lateral_tolerance_m']),
+                math.radians(float(self.p['avoidance_rejoin_yaw_tolerance_deg'])))
+            terminal = remaining_path <= float(
+                self.p['avoidance_rejoin_alignment_distance_m'])
+            steering_ready = abs(result.steering_rad) <= math.radians(
+                float(self.p['avoidance_rejoin_steering_tolerance_deg']))
+            if terminal and ready and steering_ready:
+                forward_indices = range(self.segment+1, len(self.points))
+                self.rejoin_index = min(
+                    forward_indices,
+                    key=lambda i: math.hypot(self.points[i].x-x,
+                                             self.points[i].y-y),
+                    default=-1)
+                if self.rejoin_index < 0:
+                    self.state, self.reason = 'REJOIN_FAILED', 'CSV index unavailable'
+                    self._publish_stop()
+                    return
+                self.state, self.reason = 'REJOINING_CSV', f'index={self.rejoin_index}'
+                self.transition_stop_cycles = 1
+                self._publish_stop()
+                self._publish_rejoin_marker()
+                self.get_logger().info(
+                    f'REJOINING_CSV: remaining_path={remaining_path:.3f} m, '
+                    f'lateral={lateral:.3f} m, '
+                    f'yaw_error={math.degrees(yaw_error):.3f} deg, '
+                    f'steering={math.degrees(result.steering_rad):.3f} deg, '
+                    f'index={self.rejoin_index}')
+                return
+            if terminal and self.state != 'REJOIN_ALIGNING':
+                self.state, self.reason = 'REJOIN_ALIGNING', (
+                    f'path_remaining={remaining_path:.3f} m, '
+                    f'lateral={lateral:.3f} m, '
+                    f'yaw_error={math.degrees(yaw_error):.3f} deg, '
+                    f'steering={math.degrees(result.steering_rad):.3f} deg')
+                self.get_logger().warning('REJOIN_ALIGNING: ' + self.reason)
         if not avoiding and goal_distance <= float(self.p['goal_tolerance_m']):
             self.state, self.reason = 'GOAL_REACHED', ''
             self.csv_rejoin_recovery = False
@@ -520,8 +573,10 @@ class RouteFollower(Node):
             float(self.p['cruise_speed_mps']),
             math.sqrt(max(0.0, 2.0*float(self.p['acceleration_limit_mps2'])*distance_from_start + 0.01)),
             math.sqrt(max(0.0, 2.0*float(self.p['acceleration_limit_mps2'])*goal_distance)))
-        desired_speed = (float(self.p['avoidance_speed_mps']) if avoiding else
-                         min(ramp_speed, max(0.0, active_points[result.nearest_index].drive_level)))
+        desired_speed = (float(self.p['rejoin_approach_speed_mps'])
+                 if self.state == 'REJOIN_ALIGNING' else
+                 float(self.p['avoidance_speed_mps']) if avoiding else
+                 min(ramp_speed, max(0.0, active_points[result.nearest_index].drive_level)))
         max_speed_delta = float(self.p['acceleration_limit_mps2'])*dt
         self.speed += max(-max_speed_delta, min(max_speed_delta, desired_speed-self.speed))
         self.steering = result.steering_rad
@@ -654,11 +709,35 @@ class RouteFollower(Node):
         marker.color.r, marker.color.g, marker.color.b = 0.1, 0.8, 1.0
         marker.points = [Point(x=x, y=y), Point(x=result.target_x, y=result.target_y)]
         self.segment_marker_pub.publish(marker)
+        self._publish_progress_markers()
+
+    def _publish_progress_markers(self):
+        """Traveled (grey, 0..segment) vs remaining (blue, segment..end) of
+        the single reference CSV, so both are visible simultaneously."""
+        index = max(0, min(self.segment, len(self.points)-1))
+        traveled = self._base_marker('route_traveled', 0, Marker.LINE_STRIP)
+        traveled.scale.x = 0.05
+        traveled.color.r = traveled.color.g = traveled.color.b = 0.55
+        traveled.points = [Point(x=p.x, y=p.y, z=0.02) for p in self.points[:index+1]]
+        self.traveled_marker_pub.publish(traveled)
+        remaining = self._base_marker('route_remaining', 0, Marker.LINE_STRIP)
+        remaining.scale.x = 0.05
+        remaining.color.b = 1.0
+        remaining.points = [Point(x=p.x, y=p.y, z=0.02) for p in self.points[index:]]
+        self.remaining_marker_pub.publish(remaining)
+
+    def _publish_rejoin_marker(self):
+        point = self.points[self.rejoin_index]
+        self._point_marker(self.rejoin_marker_pub, 'csv_rejoin_point', 0,
+                           point.x, point.y, (0.6, 0.0, 1.0), 0.22)
 
     def _publish_status(self, result=None, goal_distance=None):
         payload = {'state': self.state, 'reason': self.reason,
                    'control_source': self.control_source,
                    'planner_state': self.planner_state,
+                   'csv_index': self.segment,
+                   'rejoin_index': self.rejoin_index,
+                   'max_steering_deg': float(self.p['max_steering_deg']),
                    'csv_rejoin_recovery': self.csv_rejoin_recovery,
                    'avoidance_max_steering_deg': max(
                        self.avoidance_steering_samples, default=0.0),
@@ -674,9 +753,32 @@ class RouteFollower(Node):
                             'steering_deg': math.degrees(self.steering),
                             'speed_mps': self.speed,
                             'goal_distance_m': goal_distance})
-            if self.state == 'FOLLOWING_AVOIDANCE':
+            if self.state in ('FOLLOWING_AVOIDANCE', 'REJOIN_ALIGNING'):
                 self.avoidance_cte_samples.append(result.nearest.distance)
                 self.avoidance_steering_samples.append(abs(math.degrees(self.steering)))
+                final = self.selected_points[-1]
+                before_final = self.selected_points[-2]
+                payload.update({
+                    'actual_x_m': self.odom.pose.pose.position.x,
+                    'actual_y_m': self.odom.pose.pose.position.y,
+                    'actual_yaw_rad': self._yaw(self.odom.pose.pose.orientation),
+                    'csv_rejoin_yaw_rad': final.yaw,
+                    'selected_path_terminal_tangent_rad': math.atan2(
+                        final.y-before_final.y, final.x-before_final.x),
+                    'selected_path_terminal_x_m': final.x,
+                    'selected_path_terminal_y_m': final.y,
+                    'rejoin_heading_error_deg': math.degrees(abs(normalize_angle(
+                        self._yaw(self.odom.pose.pose.orientation)-final.yaw))),
+                    'rejoin_lateral_error_m': abs(-(final.x-
+                        self.odom.pose.pose.position.x)*math.sin(final.yaw) +
+                        (final.y-self.odom.pose.pose.position.y)*math.cos(final.yaw)),
+                    'selected_path_remaining_m': path_remaining(
+                        self.selected_points,
+                        nearest_projection(self.selected_points,
+                                            self.odom.pose.pose.position.x,
+                                            self.odom.pose.pose.position.y,
+                                            self.avoidance_segment)),
+                })
         text = json.dumps(payload, sort_keys=True)
         self.status_pub.publish(String(data=text))
         marker = self._base_marker('route_status', 0, Marker.TEXT_VIEW_FACING)
@@ -689,8 +791,7 @@ class RouteFollower(Node):
     def _open_actual_log(self):
         requested = str(self.p['actual_path_csv']).strip()
         if not requested:
-            route = Path(str(self.p['route_file'])).expanduser()
-            requested = str(route.with_name(route.stem + '_replay_actual.csv'))
+            return
         path = non_overwriting_path(requested)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.actual_stream = path.open('x', newline='', encoding='utf-8')

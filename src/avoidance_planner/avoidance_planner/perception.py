@@ -226,7 +226,8 @@ class TrackManager:
 
     def __init__(self, association_distance=0.45, confirmation_frames=3,
                  lost_frames=5, alpha=0.35, dynamic_enter=0.15,
-                 dynamic_exit=0.08, dynamic_frames=3, static_frames=5):
+                 dynamic_exit=0.08, dynamic_frames=3, static_frames=5,
+                 dynamic_min_observations=3):
         self.association_distance = association_distance
         self.confirmation_frames = confirmation_frames
         self.lost_frames = lost_frames
@@ -235,6 +236,7 @@ class TrackManager:
         self.dynamic_exit = dynamic_exit
         self.dynamic_frames = dynamic_frames
         self.static_frames = static_frames
+        self.dynamic_min_observations = dynamic_min_observations
         self.tracks = {}
         self.next_id = 1
 
@@ -271,19 +273,22 @@ class TrackManager:
             track.last_time, track.hits, track.misses = stamp, track.hits+1, 0
             track.history.append((stamp, track.x, track.y))
             track.history[:] = track.history[-20:]
-            if track.speed >= self.dynamic_enter:
-                track.dynamic_count += 1
-                track.static_count = 0
-            elif track.speed <= self.dynamic_exit:
-                track.static_count += 1
-                track.dynamic_count = 0
-            if track.dynamic_count >= self.dynamic_frames:
-                track.state = DYNAMIC_OBSTACLE
-            elif track.state == DYNAMIC_OBSTACLE:
-                if track.static_count >= self.static_frames:
+            if track.hits >= self.dynamic_min_observations:
+                if track.speed >= self.dynamic_enter:
+                    track.dynamic_count += 1
+                    track.static_count = 0
+                elif track.speed <= self.dynamic_exit:
+                    track.static_count += 1
+                    track.dynamic_count = 0
+                if track.dynamic_count >= self.dynamic_frames:
+                    track.state = DYNAMIC_OBSTACLE
+                elif track.state == DYNAMIC_OBSTACLE:
+                    if track.static_count >= self.static_frames:
+                        track.state = STATIC_OBSTACLE
+                elif (track.speed <= self.dynamic_exit and
+                      track.hits >= max(self.confirmation_frames,
+                                        self.static_frames)):
                     track.state = STATIC_OBSTACLE
-            elif track.hits >= max(self.confirmation_frames, self.static_frames):
-                track.state = STATIC_OBSTACLE
             track.confidence = min(1.0, track.hits/max(1, self.static_frames))
 
         for track_id in unmatched_tracks:

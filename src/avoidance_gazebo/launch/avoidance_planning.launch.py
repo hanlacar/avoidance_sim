@@ -20,6 +20,7 @@ def generate_launch_description():
     use_rviz = LaunchConfiguration('use_rviz')
     auto_start = LaunchConfiguration('auto_start')
     planner_enabled = LaunchConfiguration('planner_enabled')
+    auto_start_avoidance = LaunchConfiguration('auto_start_avoidance')
 
     simulation = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -39,6 +40,8 @@ def generate_launch_description():
             {'route_file': route_file, 'auto_start': auto_start,
              'obstacles_enabled': False, 'replan_stop_enabled': True,
              'actual_path_csv': LaunchConfiguration('actual_path_csv'),
+             'max_steering_deg': LaunchConfiguration('max_steering_deg'),
+             'auto_start_avoidance': auto_start_avoidance,
              'use_sim_time': True},
         ], output='screen')
 
@@ -63,16 +66,16 @@ def generate_launch_description():
         DeclareLaunchArgument('planner_enabled', default_value='true'),
         DeclareLaunchArgument('obstacle_seed', default_value='-1'),
         DeclareLaunchArgument('replan_trigger_distance_m', default_value='2.0'),
-        DeclareLaunchArgument('max_steering_deg', default_value='20.0'),
+        DeclareLaunchArgument('max_steering_deg', default_value='25.0'),
+        DeclareLaunchArgument('auto_start_avoidance', default_value='true'),
         DeclareLaunchArgument(
             'actual_path_csv',
-            default_value=os.path.join(os.path.expanduser('~'),
-                                       'avoidance_sim_ws', 'routes',
-                                       'planning_stop_actual.csv')),
+            default_value=''),
         SetEnvironmentVariable('ROS_DOMAIN_ID', '12'),
         SetEnvironmentVariable('RMW_IMPLEMENTATION', 'rmw_cyclonedds_cpp'),
         LogInfo(msg='[avoidance_planning] Domain 12 / CycloneDDS'),
-        LogInfo(msg='[avoidance_planning] Selected path requires explicit start service'),
+        LogInfo(msg='[avoidance_planning] Avoidance auto-starts after PATH_READY hold; '
+                    '/avoidance/start_selected_path stays available for debugging only'),
         LogInfo(msg='[avoidance_planning] route_follower owns the only /cmd_vel controller'),
         simulation,
         follower,

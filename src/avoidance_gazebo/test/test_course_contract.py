@@ -50,11 +50,28 @@ def test_planning_launch_defaults_and_control_ownership():
     assert "'replan_stop_enabled': True" in launch
     assert "DeclareLaunchArgument('obstacle_seed', default_value='-1')" in launch
     assert "DeclareLaunchArgument('replan_trigger_distance_m', default_value='2.0')" in launch
+    assert "DeclareLaunchArgument('max_steering_deg', default_value='25.0')" in launch
+    assert "DeclareLaunchArgument('auto_start_avoidance', default_value='true')" in launch
     assert "SetEnvironmentVariable('ROS_DOMAIN_ID', '12')" in launch
     assert "SetEnvironmentVariable('RMW_IMPLEMENTATION', 'rmw_cyclonedds_cpp')" in launch
     coordinator = (ROOT.parent / 'avoidance_planner' / 'avoidance_planner' /
                    'coordinator_node.py').read_text()
     assert "create_publisher(Twist" not in coordinator
+
+
+def test_planning_launch_propagates_max_steering_to_follower():
+    launch = (ROOT / 'launch' / 'avoidance_planning.launch.py').read_text()
+    follower_block = launch.split("follower = Node(")[1].split(")\n\n")[0]
+    assert "'max_steering_deg': LaunchConfiguration('max_steering_deg')" in follower_block
+    assert "'auto_start_avoidance': auto_start_avoidance" in follower_block
+
+
+def test_routes_directory_has_exactly_one_reference_csv_and_yaml():
+    routes = ROOT.parents[1] / 'routes'
+    csv_files = sorted(p.name for p in routes.glob('*.csv'))
+    yaml_files = sorted(p.name for p in routes.glob('*.yaml'))
+    assert csv_files == ['straight_reference.csv']
+    assert yaml_files == ['straight_reference.yaml']
 
 
 def test_fixed_obstacle_seed_is_reproducible():

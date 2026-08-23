@@ -149,14 +149,15 @@ def _densify_path(path, interval):
 
 
 def _build_path(route, current_pose, current_projection, obstacle_s_min,
-                obstacle_s_max, target_d, return_length, interval,
-                vehicle_length, longitudinal_safety):
+                obstacle_s_max, target_d, return_length, extension_length,
+                interval, vehicle_length, longitudinal_safety):
     lengths = route_lengths(route)
     start_s = current_projection.s
     half_length = vehicle_length/2.0
     outbound_end = obstacle_s_min-half_length-longitudinal_safety
     hold_end = obstacle_s_max+half_length+longitudinal_safety
-    return_end = hold_end+return_length
+    transition_end = hold_end+return_length
+    return_end = transition_end+max(0.0, extension_length)
     if outbound_end-start_s < 0.60 or return_end > lengths[-1]:
         return (), return_end
     samples = max(2, math.ceil((return_end-start_s)/interval)+1)
@@ -168,9 +169,11 @@ def _build_path(route, current_pose, current_projection, obstacle_s_min,
             d = current_projection.d + (target_d-current_projection.d)*quintic_blend(ratio)
         elif s <= hold_end:
             d = target_d
-        else:
-            ratio = (s-hold_end)/(return_end-hold_end)
+        elif s <= transition_end:
+            ratio = (s-hold_end)/(transition_end-hold_end)
             d = target_d*(1.0-quintic_blend(ratio))
+        else:
+            d = 0.0
         rx, ry, route_yaw = interpolate_route(route, lengths, s)
         points.append([rx-d*math.sin(route_yaw), ry+d*math.cos(route_yaw), route_yaw])
     for index in range(len(points)):
@@ -186,7 +189,8 @@ def _build_path(route, current_pose, current_projection, obstacle_s_min,
     if abs(math.atan2(math.sin(current_pose.yaw-points[0][2]),
                       math.cos(current_pose.yaw-points[0][2]))) <= math.radians(10):
         points[0][2] = current_pose.yaw
-    # Quintic lateral derivative is analytically zero at the return join.
+    # The final extension is on the reference route, so it is parallel to
+    # the CSV and gives the follower room to settle its heading.
     _, _, return_yaw = interpolate_route(route, lengths, return_end)
     points[-1][2] = return_yaw
     return tuple(Pose2(*point) for point in points), return_end
@@ -195,12 +199,13 @@ def _build_path(route, current_pose, current_projection, obstacle_s_min,
 def plan_candidates(route, current_pose, obstacle_box, left_boundary,
                     right_boundary, vehicle_length=1.30, vehicle_width=0.78,
                     center_offset=0.0, wheelbase=0.77,
-                    max_steering_rad=math.radians(20),
+                    max_steering_rad=math.radians(25),
                     obstacle_safety_lateral=0.20,
                     obstacle_safety_longitudinal=0.15, curb_safety=0.08,
                     sample_interval=0.05, target_fractions=(0.25, 0.5, 0.75),
                     return_lengths=(2.0, 2.5, 3.0), minimum_index=0,
-                    collision_check_interval=0.02):
+                    collision_check_interval=0.02,
+                    rejoin_straight_extension=1.0):
     """Generate, reject, and score smooth candidates; never clamp steering."""
     projection = project_route(route, current_pose.x, current_pose.y, minimum_index)
     obstacle_corners = ((obstacle_box.min_x, obstacle_box.min_y),
@@ -233,7 +238,8 @@ def plan_candidates(route, current_pose, obstacle_box, left_boundary,
             phase_started = time.perf_counter()
             path, return_s = _build_path(
                 route, current_pose, projection, obstacle_s_min,
-                obstacle_s_max, target, return_length, sample_interval,
+                obstacle_s_max, target, return_length, rejoin_straight_extension,
+                sample_interval,
                 vehicle_length, obstacle_safety_longitudinal)
             generation_seconds += time.perf_counter()-phase_started
             phase_started = time.perf_counter()

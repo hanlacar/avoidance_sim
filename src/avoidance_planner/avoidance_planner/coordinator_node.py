@@ -65,12 +65,13 @@ class AvoidanceCoordinator(Node):
             'dynamic_enter_speed_mps': 0.15,
             'dynamic_exit_speed_mps': 0.08,
             'dynamic_confirmation_frames': 3,
+            'dynamic_min_observations': 3,
             'static_confirmation_frames': 5,
             'wall_min_length_m': 1.50, 'wall_max_residual_m': 0.05,
             'wall_parallel_tolerance_deg': 15.0,
             'vehicle_length_m': 1.30, 'vehicle_width_m': 0.78,
             'vehicle_center_x_offset_m': 0.0, 'wheelbase_m': 0.77,
-            'max_steering_deg': 20.0,
+            'max_steering_deg': 25.0,
             'obstacle_safety_lateral_m': 0.20,
             'obstacle_safety_longitudinal_m': 0.15,
             'minimum_obstacle_depth_m': 0.65,
@@ -86,6 +87,7 @@ class AvoidanceCoordinator(Node):
             'path_sample_interval_m': 0.05,
             'collision_check_interval_m': 0.02,
             'return_transition_lengths_m': [2.0, 2.5, 3.0],
+            'rejoin_straight_extension_m': 1.0,
             'corridor_candidate_fractions': [0.25, 0.50, 0.75, 0.80, 0.85, 0.90],
             'marker_lifetime_sec': 2.0, 'planning_rate_hz': 20.0,
         }
@@ -149,6 +151,8 @@ class AvoidanceCoordinator(Node):
             String, '/avoidance/planning_failure_reason', transient)
         self.diagnostics_pub = self.create_publisher(
             String, '/avoidance/planner_diagnostics', transient)
+        self.obstacle_status_pub = self.create_publisher(
+            MarkerArray, '/avoidance/obstacle_status', transient)
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -159,7 +163,8 @@ class AvoidanceCoordinator(Node):
             float(self.p['dynamic_enter_speed_mps']),
             float(self.p['dynamic_exit_speed_mps']),
             int(self.p['dynamic_confirmation_frames']),
-            int(self.p['static_confirmation_frames']))
+            int(self.p['static_confirmation_frames']),
+            int(self.p['dynamic_min_observations']))
         self.debounce = ReplanDebounce(int(self.p['confirmation_frames']))
         self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix='local_planner')
         self.future = None
@@ -176,6 +181,7 @@ class AvoidanceCoordinator(Node):
         self.unknown = ()
         self.selected_track = None
         self.avoidance_started = False
+        self.passed_track_ids = set()
         self.last_front_scan_time = None
         self.last_rear_scan_time = None
         self.pending_scans = deque()
@@ -229,8 +235,8 @@ class AvoidanceCoordinator(Node):
     def _validate_parameters(self):
         if float(self.p['wheelbase_m']) <= 0.0:
             raise ValueError('wheelbase_m must be positive')
-        if not 0.0 < float(self.p['max_steering_deg']) <= 20.0:
-            raise ValueError('max_steering_deg must be in (0, 20]')
+        if not 0.0 < float(self.p['max_steering_deg']) <= 25.0:
+            raise ValueError('max_steering_deg must be in (0, 25]')
         if float(self.p['left_curb_inner_y_m']) <= float(self.p['right_curb_inner_y_m']):
             raise ValueError('curb boundaries are inverted')
 
@@ -256,6 +262,8 @@ class AvoidanceCoordinator(Node):
             self.avoidance_started = True
         elif msg.data == 'GPS' and self.avoidance_started:
             completed_track = self.selected_track.track_id if self.selected_track else -1
+            if completed_track >= 0:
+                self.passed_track_ids.add(completed_track)
             self.debounce = ReplanDebounce(int(self.p['confirmation_frames']))
             self.selected_track = None
             self.future = None
@@ -443,6 +451,8 @@ class AvoidanceCoordinator(Node):
         for track in self.tracks:
             if track.state not in (STATIC_OBSTACLE, DYNAMIC_OBSTACLE):
                 continue
+            if track.track_id in self.passed_track_ids:
+                continue
             risk = evaluate_track_collision(
                 self.route, pose, track, float(self.p['vehicle_length_m']),
                 float(self.p['vehicle_width_m']),
@@ -533,6 +543,8 @@ class AvoidanceCoordinator(Node):
                 'sample_interval': float(self.p['path_sample_interval_m']),
                 'target_fractions': tuple(self.p['corridor_candidate_fractions']),
                 'return_lengths': tuple(self.p['return_transition_lengths_m']),
+                'rejoin_straight_extension': float(
+                    self.p['rejoin_straight_extension_m']),
                 'minimum_index': self.route_nearest_index,
                 'collision_check_interval': float(self.p['collision_check_interval_m']),
             }
@@ -554,7 +566,7 @@ class AvoidanceCoordinator(Node):
             self.performance['total_planning_ms'] = elapsed_ms
             self._publish_plan(result, elapsed_ms)
             if result.selected is None:
-                self._set_state('PATH_INFEASIBLE', 'no collision-free <=20 deg candidate')
+                self._set_state('PATH_INFEASIBLE', 'no collision-free <=25 deg candidate')
             else:
                 self._set_state('PATH_READY', f'candidate={result.selected.candidate_id}')
 
@@ -773,7 +785,50 @@ class AvoidanceCoordinator(Node):
         self.selected_path_pub.publish(selected_path)
         self.selected_track_pub.publish(Int32(data=self.selected_track.track_id))
 
+    def _obstacle_statuses(self):
+        """Classify tracked/passed obstacles as UNSEEN/TRACKED/PLANNING/
+        AVOIDING/PASSED, ordered by x so the first two match obstacle_layout
+        ordering (obstacle_1 = nearer to route start)."""
+        known_ids = {track.track_id for track in self.tracks
+                     if track.state in (STATIC_OBSTACLE, DYNAMIC_OBSTACLE)}
+        known_ids |= self.passed_track_ids
+        by_id = {track.track_id: track for track in self.tracks}
+        entries = []
+        for track_id in known_ids:
+            track = by_id.get(track_id)
+            if track_id in self.passed_track_ids:
+                status = 'PASSED'
+            elif self.selected_track is not None and track_id == self.selected_track.track_id:
+                status = 'AVOIDING' if self.avoidance_started else 'PLANNING'
+            else:
+                status = 'TRACKED'
+            x = track.x if track is not None else (
+                self.selected_track.x if self.selected_track and
+                self.selected_track.track_id == track_id else math.inf)
+            entries.append({'track_id': track_id, 'status': status, '_sort_x': x,
+                            'x': x if math.isfinite(x) else None})
+        entries.sort(key=lambda item: item['_sort_x'])
+        for order, entry in enumerate(entries, start=1):
+            entry['label'] = f'obstacle_{order}'
+            del entry['_sort_x']
+        return entries
+
+    def _publish_obstacle_status(self, statuses):
+        markers = self._clear_array()
+        for entry in statuses:
+            marker = self._marker(
+                'obstacle_status', entry['track_id'], Marker.TEXT_VIEW_FACING)
+            marker.pose.position.x = entry['x'] if entry['x'] is not None else 0.0
+            marker.pose.position.z = 1.6
+            marker.scale.z = 0.18
+            marker.color.r = marker.color.g = marker.color.b = marker.color.a = 1.0
+            marker.text = f"{entry['label']}: {entry['status']} (track={entry['track_id']})"
+            markers.markers.append(marker)
+        self.obstacle_status_pub.publish(markers)
+
     def _publish_status(self):
+        obstacle_statuses = self._obstacle_statuses()
+        self._publish_obstacle_status(obstacle_statuses)
         payload = {
             'state': self.state, 'reason': self.reason,
             'selected_track_id': self.selected_track.track_id if self.selected_track else -1,
@@ -794,6 +849,8 @@ class AvoidanceCoordinator(Node):
                 for track in self.tracks],
             'boundary_source': self.boundary_source,
             'state_history': self.state_history[-12:],
+            'obstacle_statuses': obstacle_statuses,
+            'passed_track_ids': sorted(self.passed_track_ids),
             'drives_selected_path': False,
             'selected_path_driving_enabled': True,
             'last_plan_summary': self.last_plan_summary,

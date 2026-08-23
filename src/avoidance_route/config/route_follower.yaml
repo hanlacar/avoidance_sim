@@ -5,7 +5,7 @@ route_follower:
     lookahead_m: 1.20
     wheelbase_m: 0.77
     cruise_speed_mps: 1.00
-    max_steering_deg: 20.0
+    max_steering_deg: 25.0
     max_steering_change_deg_per_cycle: 2.0
     acceleration_limit_mps2: 0.80
     goal_tolerance_m: 0.10
@@ -21,11 +21,16 @@ route_follower:
     selected_path_topic: /avoidance/selected_path
     selected_path_timeout_s: 300.0
     avoidance_speed_mps: 1.0
+    rejoin_approach_speed_mps: 0.5
     avoidance_lookahead_m: 1.2
     avoidance_max_cross_track_error_m: 0.20
-    avoidance_rejoin_remaining_m: 0.80
-    avoidance_rejoin_lateral_tolerance_m: 0.15
-    avoidance_rejoin_yaw_tolerance_deg: 12.0
+    avoidance_rejoin_remaining_m: 1.60
+    avoidance_rejoin_lateral_tolerance_m: 0.10
+    avoidance_rejoin_yaw_tolerance_deg: 2.0
+    avoidance_rejoin_steering_tolerance_deg: 2.0
+    avoidance_rejoin_alignment_distance_m: 1.0
+    auto_start_avoidance: true
+    path_ready_hold_sec: 0.30
     csv_rejoin_lookahead_m: 2.0
     csv_rejoin_recovery_distance_m: 6.0
     gps_drive_level: 2.0

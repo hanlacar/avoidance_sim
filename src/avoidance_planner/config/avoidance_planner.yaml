@@ -25,6 +25,7 @@ avoidance_coordinator:
     dynamic_enter_speed_mps: 0.15
     dynamic_exit_speed_mps: 0.08
     dynamic_confirmation_frames: 3
+    dynamic_min_observations: 3
     static_confirmation_frames: 5
     wall_min_length_m: 1.50
     wall_max_residual_m: 0.05
@@ -33,7 +34,7 @@ avoidance_coordinator:
     vehicle_width_m: 0.78
     vehicle_center_x_offset_m: 0.0
     wheelbase_m: 0.77
-    max_steering_deg: 20.0
+    max_steering_deg: 25.0
     obstacle_safety_lateral_m: 0.20
     obstacle_safety_longitudinal_m: 0.15
     minimum_obstacle_depth_m: 0.65
@@ -50,6 +51,7 @@ avoidance_coordinator:
     path_sample_interval_m: 0.05
     collision_check_interval_m: 0.02
     return_transition_lengths_m: [2.0, 2.5, 3.0]
+    rejoin_straight_extension_m: 1.0
     corridor_candidate_fractions: [0.25, 0.50, 0.75, 0.80, 0.85, 0.90]
     marker_lifetime_sec: 2.0
     planning_rate_hz: 10.0

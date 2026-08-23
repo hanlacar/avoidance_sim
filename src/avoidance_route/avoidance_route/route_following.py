@@ -202,6 +202,17 @@ def avoidance_rejoin_ready(x, y, yaw, goal, max_remaining,
     return ready, remaining, lateral, yaw_error
 
 
+def path_remaining(points, projection):
+    """Return arc length from a projection to the final waypoint."""
+    remaining = (1.0-projection.ratio)*math.hypot(
+        points[projection.segment+1].x-points[projection.segment].x,
+        points[projection.segment+1].y-points[projection.segment].y)
+    remaining += sum(math.hypot(b.x-a.x, b.y-a.y)
+                     for a, b in zip(points[projection.segment+1:],
+                                     points[projection.segment+2:]))
+    return remaining
+
+
 def safety_reason(odom_age, odom_timeout, cross_track_error,
                   max_cross_track_error, finite_control=True):
     if odom_age > odom_timeout:
