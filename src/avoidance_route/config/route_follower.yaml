@@ -1,0 +1,18 @@
+route_follower:
+  ros__parameters:
+    odom_topic: /odom
+    cmd_topic: /cmd_vel
+    lookahead_m: 0.80
+    wheelbase_m: 0.77
+    cruise_speed_mps: 1.00
+    max_steering_deg: 20.0
+    max_steering_change_deg_per_cycle: 2.0
+    acceleration_limit_mps2: 0.80
+    goal_tolerance_m: 0.10
+    start_position_tolerance_m: 0.30
+    start_yaw_tolerance_deg: 10.0
+    max_cross_track_error_m: 0.60
+    odom_timeout_s: 0.50
+    stationary_speed_tolerance_mps: 0.03
+    control_rate_hz: 20.0
+    actual_path_min_distance_m: 0.03

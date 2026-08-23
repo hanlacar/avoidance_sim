@@ -1,12 +1,14 @@
 """Publish a recorded CSV as a transient-local nav_msgs/Path."""
 
 from pathlib import Path
+import signal
 
 import rclpy
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path as PathMsg
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
+from rclpy.signals import SignalHandlerOptions
 
 from .route_io import load_path_points
 
@@ -50,10 +52,12 @@ class RouteVisualizer(Node):
 
 
 def main(args=None):
-    rclpy.init(args=args)
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     node = RouteVisualizer()
     try:
-        rclpy.spin(node)
+        while rclpy.ok():
+            rclpy.spin_once(node, timeout_sec=0.1)
     except KeyboardInterrupt:
         pass
     finally:

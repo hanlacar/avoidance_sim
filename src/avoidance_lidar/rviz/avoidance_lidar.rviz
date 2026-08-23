@@ -90,6 +90,47 @@ Visualization Manager:
       Line Style: Lines
       Line Width: 0.03
       Color: 0; 80; 255
+    - Class: rviz_default_plugins/Path
+      Name: Replay Reference Path
+      Enabled: true
+      Topic:
+        Value: /avoidance/route/reference_path
+      Line Style: Lines
+      Line Width: 0.05
+      Color: 0; 80; 255
+    - Class: rviz_default_plugins/Path
+      Name: Replay Actual Path
+      Enabled: true
+      Topic:
+        Value: /avoidance/route/actual_path
+      Line Style: Lines
+      Line Width: 0.05
+      Color: 0; 255; 0
+    - Class: rviz_default_plugins/Marker
+      Name: Route Nearest Point
+      Enabled: true
+      Topic:
+        Value: /avoidance/route/nearest_marker
+    - Class: rviz_default_plugins/Marker
+      Name: Route Lookahead Point
+      Enabled: true
+      Topic:
+        Value: /avoidance/route/lookahead_marker
+    - Class: rviz_default_plugins/Marker
+      Name: Current Target Segment
+      Enabled: true
+      Topic:
+        Value: /avoidance/route/segment_marker
+    - Class: rviz_default_plugins/Marker
+      Name: Route Goal
+      Enabled: true
+      Topic:
+        Value: /avoidance/route/goal_marker
+    - Class: rviz_default_plugins/Marker
+      Name: Replay Status
+      Enabled: true
+      Topic:
+        Value: /avoidance/route/status_marker
   Tools:
     - Class: rviz_default_plugins/Interact
     - Class: rviz_default_plugins/MoveCamera

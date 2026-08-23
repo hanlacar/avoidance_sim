@@ -13,12 +13,13 @@ setup(
     ],
     install_requires=['setuptools'], zip_safe=True, maintainer='qor',
     maintainer_email='qor@example.com',
-    description='Actual-odometry route recording and terminal teleoperation.',
+    description='Actual-odometry route recording, replay, and terminal teleoperation.',
     license='Apache-2.0',
     extras_require={'test': ['pytest']},
     entry_points={'console_scripts': [
         'route_recorder = avoidance_route.route_recorder:main',
         'route_visualizer = avoidance_route.route_visualizer:main',
         'manual_teleop = avoidance_route.manual_teleop:main',
+        'route_follower = avoidance_route.route_follower:main',
     ]},
 )

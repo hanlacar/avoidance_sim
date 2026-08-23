@@ -23,3 +23,11 @@ def test_launch_preserves_vehicle_and_sensor_contracts():
     for expected in ("'-x', '3.25'", "'/scan_front@", "'/scan_rear@",
                      "'/odom@", "'/cmd_vel@"):
         assert expected in launch
+
+
+def test_replay_launch_defaults_safe_and_starts_single_follower():
+    launch = (ROOT / 'launch' / 'route_replay.launch.py').read_text()
+    assert "DeclareLaunchArgument('spawn_obstacles', default_value='false')" in launch
+    assert "DeclareLaunchArgument('auto_start', default_value='false')" in launch
+    assert launch.count("executable='route_follower'") == 1
+    assert 'AUTOMATIC START INHIBITED' in launch

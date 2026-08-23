@@ -1,6 +1,7 @@
 """Small terminal teleop for turtle_car's geometry_msgs/Twist contract."""
 
 import select
+import signal
 import sys
 import termios
 import threading
@@ -9,6 +10,9 @@ import tty
 import rclpy
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
+from rclpy.signals import SignalHandlerOptions
+
+from .authority import CommandAuthority, CommandAuthorityError
 
 
 HELP = """Keys: w/s speed, a/d steer, space stop, q quit
@@ -19,6 +23,7 @@ Commands time out automatically; keep pressing a motion key.
 class ManualTeleop(Node):
     def __init__(self):
         super().__init__('manual_teleop')
+        self.authority = CommandAuthority('manual_teleop')
         for name, value in (('cmd_topic', '/cmd_vel'), ('speed_mps', 0.7),
                             ('steering_rate_rps', 0.6), ('key_timeout_s', 0.35)):
             self.declare_parameter(name, value)
@@ -60,12 +65,23 @@ class ManualTeleop(Node):
         self.command = Twist()
         self.publisher.publish(self.command)
 
+    def destroy_node(self):
+        self.stop()
+        self.authority.close()
+        super().destroy_node()
+
 
 def main(args=None):
     if not sys.stdin.isatty():
         raise RuntimeError('manual_teleop requires an interactive terminal')
-    rclpy.init(args=args)
-    node = ManualTeleop()
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        node = ManualTeleop()
+    except CommandAuthorityError as exc:
+        print(f'manual_teleop refused: {exc}')
+        rclpy.shutdown()
+        return
     settings = termios.tcgetattr(sys.stdin)
     thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     thread.start()
@@ -79,7 +95,6 @@ def main(args=None):
         pass
     finally:
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
-        node.stop()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

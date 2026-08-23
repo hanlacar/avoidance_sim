@@ -64,3 +64,36 @@ rviz2 -d $(ros2 pkg prefix avoidance_lidar)/share/avoidance_lidar/rviz/avoidance
 | `/avoidance/route/live_path`, `/avoidance/route/saved_path`, `/avoidance/route/csv_path` | `nav_msgs/msg/Path` |
 
 기본 CSV 위치는 `~/avoidance_sim_ws/routes/straight_reference.csv`이며 거리·주기 조건은 `avoidance_route/config/route_recorder.yaml`, ROI·클러스터 조건은 `avoidance_lidar/config/front_lidar.yaml`에서 바꾼다.
+
+## 장애물 없는 CSV 재현 주행
+
+`route_follower`만 `/cmd_vel` 제어권을 가져야 하므로 재현 중에는 `manual_teleop`을 실행하지 않는다. Pure Pursuit 내부 조향각은 radian이며, `/cmd_vel.angular.z`에는 Gazebo Ackermann 플러그인이 요구하는 yaw rate(rad/s)를 발행한다.
+
+터미널 1 — 시뮬레이션, follower, LiDAR 및 RViz2:
+
+```bash
+cd ~/avoidance_sim_ws
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+ros2 launch avoidance_gazebo route_replay.launch.py \
+  route_file:=/home/qor/avoidance_sim_ws/routes/straight_reference.csv \
+  spawn_obstacles:=false use_rviz:=true auto_start:=false
+```
+
+터미널 2 — 상태 확인:
+
+```bash
+cd ~/avoidance_sim_ws
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+ros2 topic echo /avoidance/route/status
+```
+
+터미널 3 — 명시적 출발 또는 비상 정지:
+
+```bash
+ros2 service call /avoidance/route/start std_srvs/srv/Trigger "{}"
+ros2 service call /avoidance/route/stop std_srvs/srv/Trigger "{}"
+```
+
+기본 설정은 `avoidance_route/config/route_follower.yaml`이다. 기준 경로는 `/avoidance/route/reference_path`, 실제 궤적은 `/avoidance/route/actual_path`, 최종 측정값은 `/avoidance/route/metrics`에서 확인한다. 실제 궤적 CSV는 `routes/replay_actual*.csv`에 기록되며 원본 CSV는 수정하지 않는다.
