@@ -12,6 +12,7 @@
   <gazebo reference="laser_link">
     <sensor name="front_lidar" type="gpu_lidar">
       <topic>/scan_front</topic>
+      <gz_frame_id>laser_link</gz_frame_id>
       <update_rate>15</update_rate>
       <always_on>true</always_on>
       <visualize>true</visualize>
@@ -25,6 +26,7 @@
   <gazebo reference="rear_laser_link">
     <sensor name="rear_lidar" type="gpu_lidar">
       <topic>/scan_rear</topic>
+      <gz_frame_id>rear_laser_link</gz_frame_id>
       <update_rate>15</update_rate>
       <always_on>true</always_on>
       <visualize>true</visualize>

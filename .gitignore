@@ -3,4 +3,8 @@ install/
 log/
 *.pyc
 __pycache__/
+.pytest_cache/
+*.egg-info/
+routes/*.csv
+routes/*.yaml
 .vscode/

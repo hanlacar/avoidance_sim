@@ -23,5 +23,5 @@ setup(
     maintainer_email='qor@example.com',
     description='Straight single-lane Gazebo obstacle course for turtle_car.',
     license='Apache-2.0',
-    tests_require=['pytest'],
+    extras_require={'test': ['pytest']},
 )

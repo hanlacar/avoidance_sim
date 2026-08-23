@@ -1,0 +1,10 @@
+route_recorder:
+  ros__parameters:
+    odom_topic: /odom
+    cmd_topic: /cmd_vel
+    min_distance_m: 0.10
+    min_period_s: 0.10
+    direction_deadband_mps: 0.02
+    record_direction: forward
+    record_mode: NORMAL
+    record_drive_level: 1.0

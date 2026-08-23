@@ -53,10 +53,6 @@
           <material>
             <ambient>0.12 0.12 0.12 1</ambient>
             <diffuse>0.14 0.14 0.14 1</diffuse>
-            <roughness>
-              <metalness>0</metalness>
-              <roughness>0.95</roughness>
-            </roughness>
           </material>
         </visual>
       </link>
@@ -259,7 +255,7 @@
 
     <model name="obstacle_1">
       <static>true</static>
-      <pose>__OBS1_X__ __OBS1_Y__ 0.075 0 0 0</pose>
+      <pose>9.325000 0.780 0.075 0 0 0</pose>
 
       <link name="box_link">
         <collision name="collision">
@@ -287,7 +283,7 @@
 
     <model name="obstacle_2">
       <static>true</static>
-      <pose>__OBS2_X__ __OBS2_Y__ 0.075 0 0 0</pose>
+      <pose>20.675000 -0.780 0.075 0 0 0</pose>
 
       <link name="box_link">
         <collision name="collision">
