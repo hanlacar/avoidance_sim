@@ -27,12 +27,12 @@ def _launch_course(context):
         output='screen',
     )
 
-    # The 1.30 m vehicle's front end is x=1.40, 0.10 m behind the start line.
+    # The 1.30 m vehicle's front end is x=3.90, 0.10 m behind the start line.
     # Wait for the Gazebo GUI scene manager so the dynamic model is rendered.
     spawn_vehicle = TimerAction(period=5.0, actions=[ExecuteProcess(
         cmd=['ros2', 'run', 'ros_gz_sim', 'create', '-world', 'straight_avoidance',
              '-topic', 'robot_description', '-name', 'turtle_car',
-             '-x', '0.75', '-y', '0.0', '-z', '0.0', '-Y', '0.0'],
+             '-x', '3.25', '-y', '0.0', '-z', '0.0', '-Y', '0.0'],
         output='screen',
     )])
 
@@ -52,11 +52,14 @@ def _launch_course(context):
     return [
         LogInfo(msg=f'[avoidance_gazebo] World: {world_path}'),
         LogInfo(msg='[avoidance_gazebo] Obstacles: disabled'),
-        LogInfo(msg='[avoidance_gazebo] Road: 18.50 m x 2.50 m, curb height: 0.05 m'),
-        LogInfo(msg='[avoidance_gazebo] Start: x=1.50 m'),
-        LogInfo(msg='[avoidance_gazebo] Finish: x=16.50 m'),
-        LogInfo(msg='[avoidance_gazebo] Start-to-finish distance: 15.00 m'),
-        LogInfo(msg='[avoidance_gazebo] Vehicle spawn: x=0.75 m, y=0.00 m, z=0.00 m, yaw=0.00 rad'),
+        LogInfo(msg='[avoidance_gazebo] Road: 30.00 m'),
+        LogInfo(msg='[avoidance_gazebo] White-line inner width: 1.56 m'),
+        LogInfo(msg='[avoidance_gazebo] Start: x=4.00 m'),
+        LogInfo(msg='[avoidance_gazebo] Finish: x=26.00 m'),
+        LogInfo(msg='[avoidance_gazebo] Start-to-finish distance: 22.00 m'),
+        LogInfo(msg='[avoidance_gazebo] Vehicle spawn: x=3.25 m, y=0.00 m, z=0.00 m, yaw=0.00 rad'),
+        LogInfo(msg='[avoidance_gazebo] Front LiDAR: x=+0.65 m'),
+        LogInfo(msg='[avoidance_gazebo] Rear LiDAR: x=-0.65 m'),
         gz,
         rsp,
         bridge,
