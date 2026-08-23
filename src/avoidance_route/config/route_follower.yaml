@@ -16,3 +16,5 @@ route_follower:
     stationary_speed_tolerance_mps: 0.03
     control_rate_hz: 20.0
     actual_path_min_distance_m: 0.03
+    replan_stop_enabled: false
+    replan_required_topic: /avoidance/replan_required

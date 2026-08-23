@@ -97,3 +97,38 @@ ros2 service call /avoidance/route/stop std_srvs/srv/Trigger "{}"
 ```
 
 기본 설정은 `avoidance_route/config/route_follower.yaml`이다. 기준 경로는 `/avoidance/route/reference_path`, 실제 궤적은 `/avoidance/route/actual_path`, 최종 측정값은 `/avoidance/route/metrics`에서 확인한다. 실제 궤적 CSV는 `routes/replay_actual*.csv`에 기록되며 원본 CSV는 수정하지 않는다.
+
+## LiDAR 회피 경로 계획 검증(계획만 수행)
+
+이 모드는 LiDAR 점을 `odom`으로 변환해 벽과 추적 장애물을 분류하고, 기준 CSV 경로와 차량 사각 footprint의 충돌이 확인되면 follower를 정지시킨다. 정지 확인 후 `avoidance_planner`가 quintic lateral-offset 후보를 만들고 충돌·연석·곡률·`±20°` 조향 제한을 검사한다. 선택 경로는 시각화만 하며 차량이 이를 추종하거나 자동 재출발하지 않는다. `/cmd_vel`은 계속 `route_follower`만 제어한다.
+
+터미널 1 — 랜덤 장애물, follower, planner, Gazebo 및 RViz2:
+
+```bash
+cd ~/avoidance_sim_ws
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+ros2 launch avoidance_gazebo avoidance_planning.launch.py \
+  route_file:=/home/qor/avoidance_sim_ws/routes/straight_reference.csv \
+  spawn_obstacles:=true use_rviz:=true auto_start:=false planner_enabled:=true
+```
+
+터미널 2 — planner 상태:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ~/avoidance_sim_ws/install/setup.bash
+ros2 topic echo /avoidance/planner_status
+```
+
+터미널 3 — 재계획 latch와 명시적 출발/정지:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ~/avoidance_sim_ws/install/setup.bash
+ros2 topic echo /avoidance/replan_required
+ros2 service call /avoidance/route/start std_srvs/srv/Trigger "{}"
+ros2 service call /avoidance/route/stop std_srvs/srv/Trigger "{}"
+```
+
+MCU용 정지 계약은 `/lidar_drive`(`Float32`, `0.00`)와 `/lidar_wheel`(`Int32`, `0`)이다. 선택 경로와 후보는 `/avoidance/selected_path`, `/avoidance/candidate_paths`; 정적·동적·벽·불확실 물체는 각각 `/avoidance/static_obstacles`, `/avoidance/dynamic_obstacles`, `/avoidance/walls`, `/avoidance/unknown_objects`에서 확인한다. 설정은 `avoidance_planner/config/avoidance_planner.yaml`에 있다.

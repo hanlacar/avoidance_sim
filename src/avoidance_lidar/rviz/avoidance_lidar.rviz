@@ -131,6 +131,54 @@ Visualization Manager:
       Enabled: true
       Topic:
         Value: /avoidance/route/status_marker
+    - Class: rviz_default_plugins/Path
+      Name: Selected Avoidance Path
+      Enabled: true
+      Topic:
+        Value: /avoidance/selected_path
+      Line Style: Lines
+      Line Width: 0.10
+      Color: 255; 0; 255
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Candidate Avoidance Paths
+      Enabled: true
+      Topic:
+        Value: /avoidance/candidate_paths
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Static Obstacles
+      Enabled: true
+      Topic:
+        Value: /avoidance/static_obstacles
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Dynamic Obstacles
+      Enabled: true
+      Topic:
+        Value: /avoidance/dynamic_obstacles
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Detected Walls
+      Enabled: true
+      Topic:
+        Value: /avoidance/walls
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Unknown Objects
+      Enabled: true
+      Topic:
+        Value: /avoidance/unknown_objects
+    - Class: rviz_default_plugins/Marker
+      Name: Safe Corridor
+      Enabled: true
+      Topic:
+        Value: /avoidance/corridor_marker
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Planning Points And Footprint
+      Enabled: true
+      Topic:
+        Value: /avoidance/planning_points
+    - Class: rviz_default_plugins/Marker
+      Name: Planner Status
+      Enabled: true
+      Topic:
+        Value: /avoidance/planner_status_marker
   Tools:
     - Class: rviz_default_plugins/Interact
     - Class: rviz_default_plugins/MoveCamera

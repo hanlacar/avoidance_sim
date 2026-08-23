@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from std_msgs.msg import Bool
 
 from avoidance_route.route_follower import RouteFollower
 from avoidance_route.route_following import (
@@ -139,3 +140,15 @@ def test_manual_teleop_publisher_is_reported_as_conflict():
         p={'cmd_topic': '/cmd_vel'}, get_name=lambda: 'route_follower',
         get_publishers_info_by_topic=lambda _topic: [endpoint])
     assert RouteFollower._conflicting_publishers(fake) == ['/manual_teleop']
+
+
+def test_replan_request_latches_exact_stop_without_restart():
+    fake = SimpleNamespace(
+        p={'replan_stop_enabled': True}, state='FOLLOWING', reason='',
+        start_requested=True, _publish_stop=Mock(), _close_actual_log=Mock(),
+        _publish_status=Mock(), get_logger=lambda: Mock())
+    RouteFollower._replan_required(fake, Bool(data=True))
+    assert fake.state == 'STOPPED_FOR_REPLAN'
+    assert fake.reason == 'REPLAN_REQUIRED' and not fake.start_requested
+    fake._publish_stop.assert_called_once()
+    fake._close_actual_log.assert_called_once()

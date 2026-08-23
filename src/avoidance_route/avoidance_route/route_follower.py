@@ -14,7 +14,7 @@ from nav_msgs.msg import Odometry, Path as PathMsg
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from rclpy.signals import SignalHandlerOptions
-from std_msgs.msg import Float32, Int32, String
+from std_msgs.msg import Bool, Float32, Int32, String
 from std_srvs.srv import Trigger
 from visualization_msgs.msg import Marker
 
@@ -26,7 +26,8 @@ from .route_io import non_overwriting_path
 
 
 STATES = ('WAITING_FOR_ODOM', 'WAITING_FOR_ROUTE', 'START_POSE_CHECK',
-          'READY', 'FOLLOWING', 'GOAL_REACHED', 'STOPPED', 'ERROR')
+          'READY', 'FOLLOWING', 'GOAL_REACHED', 'STOPPED',
+          'STOPPED_FOR_REPLAN', 'ERROR')
 
 
 class RouteFollower(Node):
@@ -45,6 +46,8 @@ class RouteFollower(Node):
             'stationary_speed_tolerance_mps': 0.03,
             'control_rate_hz': 20.0, 'actual_path_min_distance_m': 0.03,
             'actual_path_csv': '',
+            'replan_stop_enabled': False,
+            'replan_required_topic': '/avoidance/replan_required',
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -112,6 +115,8 @@ class RouteFollower(Node):
             self.start_requested = False
 
         self.create_subscription(Odometry, str(self.p['odom_topic']), self._odom, 20)
+        self.create_subscription(
+            Bool, str(self.p['replan_required_topic']), self._replan_required, 10)
         period = 1.0 / max(1.0, float(self.p['control_rate_hz']))
         self.create_timer(period, self._control)
         self.get_logger().info(
@@ -135,8 +140,23 @@ class RouteFollower(Node):
         self.odom_receive_time = self.get_clock().now()
         if self.state == 'WAITING_FOR_ODOM':
             self.state = 'START_POSE_CHECK'
-        if self.state in ('READY', 'FOLLOWING', 'GOAL_REACHED', 'STOPPED'):
+        if self.state in ('READY', 'FOLLOWING', 'GOAL_REACHED', 'STOPPED',
+                          'STOPPED_FOR_REPLAN'):
             self._append_actual(msg)
+
+    def _replan_required(self, msg):
+        if not bool(self.p['replan_stop_enabled']) or not msg.data:
+            return
+        if self.state == 'STOPPED_FOR_REPLAN':
+            self._publish_stop()
+            return
+        self.state, self.reason = 'STOPPED_FOR_REPLAN', 'REPLAN_REQUIRED'
+        self.start_requested = False
+        self._publish_stop()
+        self._close_actual_log()
+        self._publish_status()
+        self.get_logger().warning(
+            'STOPPED_FOR_REPLAN: exact-zero /cmd_vel latched; automatic restart disabled')
 
     def _pose(self):
         pose = self.odom.pose.pose
@@ -170,6 +190,10 @@ class RouteFollower(Node):
         return True
 
     def _start(self, _request, response):
+        if self.state == 'STOPPED_FOR_REPLAN':
+            response.success, response.message = False, 'replan stop is latched; reset launch required'
+            self._publish_stop()
+            return response
         if bool(self.p['obstacles_enabled']):
             response.success, response.message = False, 'obstacles enabled; replay inhibited'
             self._publish_stop()

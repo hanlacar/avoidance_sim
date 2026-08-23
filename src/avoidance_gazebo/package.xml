@@ -19,6 +19,7 @@
   <exec_depend>tf2_msgs</exec_depend>
   <exec_depend>avoidance_lidar</exec_depend>
   <exec_depend>avoidance_route</exec_depend>
+  <exec_depend>avoidance_planner</exec_depend>
   <test_depend>python3-pytest</test_depend>
 
   <export>
