@@ -77,8 +77,8 @@ def test_facility_launch_is_independent_directional_and_complete():
     assert launch.count("executable='avoidance_coordinator'") == 1
     assert "executable='front_lidar_detector'" in launch
     assert "executable='route_visualizer'" in launch
-    assert "'-world', world_name" in launch
-    assert "'-x', '3.25', '-y', '0.0', '-z', '0.0'" in launch
+    assert "'--world', world_name, '--name', 'turtle_car'" in launch
+    assert "'--x', '3.25', '--y', '0.0', '--z', '0.30'" in launch
     assert "DeclareLaunchArgument('actual_path_csv', default_value='')" in launch
     assert "'return_transition_lengths_m': [4.0]" in launch
     assert "'lateral_target_samples': 3" in launch
@@ -91,3 +91,45 @@ def test_setup_installs_facility_launch_and_world_patterns():
     setup = (ROOT/'setup.py').read_text()
     assert "glob('launch/*.launch.py')" in setup
     assert "glob('worlds/*.sdf')" in setup
+
+
+def test_facility_spawn_is_readiness_checked_and_gates_driving_nodes():
+    launch = (ROOT/'launch/facility_s_curve_planning.launch.py').read_text()
+    verifier = (ROOT/'avoidance_gazebo/spawn_verified_vehicle.py').read_text()
+    assert "executable='spawn_verified_vehicle'" in launch
+    assert 'TimerAction' not in launch
+    assert "target_action=spawn_vehicle" in launch
+    assert 'if event.returncode != 0:' in launch
+    assert "'gz_args': f'-r -s {world_file}'" in launch
+    assert "cmd=['gz', 'sim', '-g', '--force-version', '8']" in launch
+    assert 'verified_actions + [' in launch
+    assert 'follower_shutdown, follower, planner' in launch
+    assert "'/robot_description'" in verifier
+    assert '_wait_for_world(args.world, args.timeout)' in verifier
+    assert "f'/world/{world_name}/create'" in verifier
+    assert "f'/world/{world_name}/scene/info'" in verifier
+    assert "'-allow_renaming', 'false'" in verifier
+    assert 'duplicate turtle_car MODEL already exists' in verifier
+    assert 'Verify twice' in verifier
+
+
+def test_turtle_car_urdf_has_visible_vehicle_parts():
+    root = ET.parse(ROOT/'urdf/turtle_car.urdf.xacro').getroot()
+    visuals = root.findall('.//visual')
+    assert len(visuals) >= 5
+    assert all(visual.find('geometry') is not None for visual in visuals)
+    source = (ROOT/'urdf/turtle_car.urdf.xacro').read_text()
+    assert '<xacro:wheel_link name="front_left_wheel_link"/>' in source
+    assert '<xacro:wheel_link name="front_right_wheel_link"/>' in source
+    assert '<xacro:wheel_link name="rear_left_wheel_link"/>' in source
+    assert '<xacro:wheel_link name="rear_right_wheel_link"/>' in source
+    for link in ('chassis_link', 'laser_link', 'rear_laser_link'):
+        element = root.find(f"link[@name='{link}']")
+        assert element is not None
+        assert element.find('visual/geometry') is not None
+        assert element.find('collision/geometry') is not None
+        visual_geometry = element.find('visual/geometry')[0]
+        collision_geometry = element.find('collision/geometry')[0]
+        visual_geometry.tail = None
+        collision_geometry.tail = None
+        assert ET.tostring(visual_geometry) == ET.tostring(collision_geometry)

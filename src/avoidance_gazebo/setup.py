@@ -24,4 +24,9 @@ setup(
     description='Straight single-lane Gazebo obstacle course for turtle_car.',
     license='Apache-2.0',
     extras_require={'test': ['pytest']},
+    entry_points={
+        'console_scripts': [
+            'spawn_verified_vehicle = avoidance_gazebo.spawn_verified_vehicle:main',
+        ],
+    },
 )

@@ -5,8 +5,8 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, EmitEvent, ExecuteProcess,
                             IncludeLaunchDescription, LogInfo, OpaqueFunction,
-                            RegisterEventHandler, SetEnvironmentVariable,
-                            TimerAction)
+                            RegisterEventHandler,
+                            SetEnvironmentVariable)
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
@@ -35,24 +35,30 @@ def _facility_actions(context):
     route_file = LaunchConfiguration('route_file')
     use_rviz = LaunchConfiguration('use_rviz')
     use_rviz_text = use_rviz.perform(context).strip().lower()
-    headless = use_rviz_text not in ('true', '1', 'yes', 'on')
+    show_gui = use_rviz_text in ('true', '1', 'yes', 'on')
 
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(ros_gz_share, 'launch', 'gz_sim.launch.py')),
         launch_arguments={
-            'gz_args': f'-r {"-s " if headless else ""}{world_file}',
+            # Start the server alone.  The GUI joins only after turtle_car is
+            # verified, so its initial scene contains the dynamically spawned
+            # model instead of racing the scene broadcaster update.
+            'gz_args': f'-r -s {world_file}',
         }.items())
+    gazebo_gui = ExecuteProcess(
+        cmd=['gz', 'sim', '-g', '--force-version', '8'], output='screen')
     robot_description = Command(['xacro ', xacro_file])
     robot_state_publisher = Node(
         package='robot_state_publisher', executable='robot_state_publisher',
         parameters=[{'robot_description': robot_description,
                      'use_sim_time': True}], output='screen')
-    spawn_vehicle = TimerAction(period=5.0, actions=[ExecuteProcess(
-        cmd=['ros2', 'run', 'ros_gz_sim', 'create', '-world', world_name,
-             '-topic', 'robot_description', '-name', 'turtle_car',
-             '-x', '3.25', '-y', '0.0', '-z', '0.0', '-Y', '0.0'],
-        output='screen')])
+    spawn_vehicle = Node(
+        package='avoidance_gazebo', executable='spawn_verified_vehicle',
+        arguments=['--world', world_name, '--name', 'turtle_car',
+                   '--x', '3.25', '--y', '0.0', '--z', '0.30',
+                   '--yaw', '0.0', '--ground-z', '-0.025'],
+        output='screen')
 
     bridge = Node(
         package='ros_gz_bridge', executable='parameter_bridge', arguments=[
@@ -116,13 +122,35 @@ def _facility_actions(context):
         on_exit=[LogInfo(msg='[facility_s_curve] route_follower exited; shutting down'),
                  EmitEvent(event=Shutdown(reason='route_follower exited'))]))
 
+    def _after_verified_spawn(event, _context):
+        if event.returncode != 0:
+            return [
+                LogInfo(msg='[facility_s_curve] ERROR: Vehicle spawn verification '
+                            f'failed with code {event.returncode}; follower and '
+                            'planner will not start'),
+                EmitEvent(event=Shutdown(
+                    reason='turtle_car spawn verification failed')),
+            ]
+        verified_actions = [
+            LogInfo(msg='[facility_s_curve] Verified turtle_car MODEL; starting '
+                        'route_follower and avoidance_coordinator'),
+        ]
+        if show_gui:
+            verified_actions.append(gazebo_gui)
+        return verified_actions + [
+            follower_shutdown, follower, planner,
+        ]
+
+    spawn_gate = RegisterEventHandler(OnProcessExit(
+        target_action=spawn_vehicle, on_exit=_after_verified_spawn))
+
     return [
         LogInfo(msg=f'[facility_s_curve] Single-simulator lock: {lock_path}'),
         LogInfo(msg=f'[facility_s_curve] Fixed world: {world_name} ({world_file})'),
         LogInfo(msg='[facility_s_curve] Static obstacles / common Frenet planner / '
                     'single /cmd_vel authority'),
-        gazebo, robot_state_publisher, bridge, spawn_vehicle, lidar,
-        route_visualizer, rviz, follower_shutdown, follower, planner]
+        gazebo, robot_state_publisher, bridge, lidar, route_visualizer, rviz,
+        spawn_gate, spawn_vehicle]
 
 
 def generate_launch_description():
