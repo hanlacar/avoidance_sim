@@ -103,8 +103,9 @@ def test_completed_track_is_marked_passed_and_excluded_from_status():
         tracker=SimpleNamespace(reset_epoch=Mock()),
         tracks=(), walls=(), unknown=(), wall_hits=0,
         last_track_decisions=[],
-        p={'confirmation_frames': 3},
-        passed_track_ids=set(), _set_state=Mock())
+        p={'confirmation_frames': 3, 'fixed_environment_mode': False},
+        passed_track_ids=set(), passed_obstacle_s=[],
+        get_logger=Mock(return_value=Mock()), _set_state=Mock())
     AvoidanceCoordinator._control_source(fake, SimpleNamespace(data='GPS'))
     assert fake.passed_track_ids == {7}
     fake.tracker.reset_epoch.assert_called_once_with()

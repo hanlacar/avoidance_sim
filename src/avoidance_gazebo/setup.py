@@ -26,6 +26,9 @@ setup(
     extras_require={'test': ['pytest']},
     entry_points={
         'console_scripts': [
+            'ackermann_joint_adapter = avoidance_gazebo.ackermann_joint_adapter:main',
+            'gazebo_gui_guard = avoidance_gazebo.gazebo_gui_guard:main',
+            'ground_truth_odometry = avoidance_gazebo.ground_truth_odometry:main',
             'spawn_verified_vehicle = avoidance_gazebo.spawn_verified_vehicle:main',
         ],
     },

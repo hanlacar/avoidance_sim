@@ -38,21 +38,43 @@
   </gazebo>
 
   <gazebo>
-    <plugin filename="gz-sim-ackermann-steering-system" name="gz::sim::systems::AckermannSteering">
-      <left_joint>front_left_wheel_joint</left_joint>
-      <right_joint>front_right_wheel_joint</right_joint>
-      <left_steering_joint>front_left_steering_joint</left_steering_joint>
-      <right_steering_joint>front_right_steering_joint</right_steering_joint>
-      <wheel_base>${wheel_base}</wheel_base>
-      <wheel_separation>${wheel_track}</wheel_separation>
-      <kingpin_width>${kingpin_width}</kingpin_width>
-      <wheel_radius>${wheel_radius}</wheel_radius>
-      <steering_limit>${ackermann_plugin_steering_limit}</steering_limit>
-      <topic>/cmd_vel</topic>
-      <odom_topic>/odom</odom_topic>
-      <tf_topic>/tf</tf_topic>
-      <frame_id>odom</frame_id>
-      <child_frame_id>base_footprint</child_frame_id>
+    <plugin filename="gz-sim-joint-position-controller-system"
+            name="gz::sim::systems::JointPositionController">
+      <joint_name>front_left_steering_joint</joint_name>
+      <topic>/turtle_car/front_left_steering_cmd</topic>
+      <p_gain>100</p_gain><d_gain>5</d_gain>
+      <cmd_min>-20</cmd_min><cmd_max>20</cmd_max>
+    </plugin>
+    <plugin filename="gz-sim-joint-position-controller-system"
+            name="gz::sim::systems::JointPositionController">
+      <joint_name>front_right_steering_joint</joint_name>
+      <topic>/turtle_car/front_right_steering_cmd</topic>
+      <p_gain>100</p_gain><d_gain>5</d_gain>
+      <cmd_min>-20</cmd_min><cmd_max>20</cmd_max>
+    </plugin>
+    <xacro:macro name="wheel_controller" params="joint topic">
+      <plugin filename="gz-sim-joint-controller-system"
+              name="gz::sim::systems::JointController">
+        <joint_name>${joint}</joint_name>
+        <topic>${topic}</topic>
+      </plugin>
+    </xacro:macro>
+    <xacro:wheel_controller joint="front_left_wheel_joint"
+      topic="/turtle_car/front_left_wheel_cmd"/>
+    <xacro:wheel_controller joint="front_right_wheel_joint"
+      topic="/turtle_car/front_right_wheel_cmd"/>
+    <xacro:wheel_controller joint="rear_left_wheel_joint"
+      topic="/turtle_car/rear_left_wheel_cmd"/>
+    <xacro:wheel_controller joint="rear_right_wheel_joint"
+      topic="/turtle_car/rear_right_wheel_cmd"/>
+    <plugin filename="gz-sim-odometry-publisher-system"
+            name="gz::sim::systems::OdometryPublisher">
+      <odom_frame>world</odom_frame>
+      <robot_base_frame>turtle_car</robot_base_frame>
+      <dimensions>2</dimensions>
+      <odom_publish_frequency>50</odom_publish_frequency>
+      <odom_topic>/ground_truth/odom_world</odom_topic>
+      <tf_topic>/ground_truth/tf_world</tf_topic>
     </plugin>
   </gazebo>
 </robot>

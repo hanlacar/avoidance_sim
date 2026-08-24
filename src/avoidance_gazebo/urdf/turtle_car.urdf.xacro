@@ -14,13 +14,6 @@
   <xacro:property name="wheel_width" value="0.12"/>
   <!-- Physical limit of each front steering joint: exactly 28 deg. -->
   <xacro:property name="steering_limit" value="0.4886921906"/>
-  <!-- Gazebo Sim 8 interprets steering_limit as a virtual limit used in
-       minimumTurningRadius = wheel_base / sin(limit), then derives the two
-       wheel angles with Ackermann geometry.  This value therefore differs
-       from the physical joint limit: it makes the generated inner angle
-       exactly 28 deg at R=1.2508213499 m. -->
-  <xacro:property name="ackermann_plugin_steering_limit"
-                  value="0.4821614777"/>
   <xacro:property name="steering_link_radius" value="0.020"/>
   <xacro:property name="steering_link_height" value="0.040"/>
   <!-- LiDAR centres are on the vehicle front/rear end planes. -->

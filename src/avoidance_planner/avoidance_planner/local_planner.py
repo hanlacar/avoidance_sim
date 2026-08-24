@@ -278,7 +278,12 @@ def _build_path(route, current_pose, current_projection, obstacle_s_min,
     lengths = route_lengths(route)
     start_s = current_projection.s
     half_length = vehicle_length/2.0
-    outbound_end = obstacle_s_min-half_length-longitudinal_safety
+    # Let the collision sweep, which already uses the complete vehicle
+    # footprint and inflated obstacle, decide how late the lateral transition
+    # may finish. Forcing the offset to finish a half vehicle length before
+    # the inflated front face shortened a 2 m trigger into ~1.5 m and rejected
+    # physically feasible <=25 deg S turns.
+    outbound_end = obstacle_s_min
     hold_end = obstacle_s_max+half_length+longitudinal_safety
     transition_end = hold_end+return_length
     return_end = transition_end+max(0.0, extension_length)

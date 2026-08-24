@@ -157,6 +157,7 @@ class RouteFollower(Node):
         self.avoidance_actual_path = PathMsg()
         self.avoidance_cte_samples = []
         self.avoidance_steering_samples = []
+        self.completed_avoidances = []
         self.last_scan_receive_time = None
         self.last_rear_scan_receive_time = None
         self.last_odom_stamp_ns = None
@@ -432,6 +433,8 @@ class RouteFollower(Node):
         self.steering = self.speed = 0.0
         self.avoidance_track_id = self.selected_track_id
         self.avoidance_actual_path = PathMsg()
+        self.avoidance_cte_samples = []
+        self.avoidance_steering_samples = []
         self.state, self.reason = 'FOLLOWING_AVOIDANCE', ''
         self.control_source = 'LIDAR'
         self.last_control_time = None
@@ -746,6 +749,24 @@ class RouteFollower(Node):
                 self.transition_stop_cycles = 1
                 self._publish_stop()
                 self._publish_rejoin_marker()
+                completed = {
+                    'track_id': self.avoidance_track_id,
+                    'rejoin_index': self.rejoin_index,
+                    'max_cte_m': max(self.avoidance_cte_samples, default=0.0),
+                    'mean_cte_m': (statistics.fmean(self.avoidance_cte_samples)
+                                   if self.avoidance_cte_samples else 0.0),
+                    'max_steering_deg': max(
+                        self.avoidance_steering_samples, default=0.0),
+                    'rejoin_lateral_error_m': lateral,
+                    'rejoin_heading_error_deg': math.degrees(yaw_error),
+                    'rejoin_steering_error_deg': math.degrees(abs(
+                        normalize_angle(result.steering_rad-
+                                        expected_terminal_steering))),
+                }
+                self.completed_avoidances.append(completed)
+                self.get_logger().info(
+                    'AVOIDANCE_COMPLETED_METRICS ' +
+                    json.dumps(completed, sort_keys=True))
                 self.get_logger().info(
                     f'REJOINING_CSV: remaining_path={remaining_path:.3f} m, '
                     f'lateral={lateral:.3f} m, '
@@ -986,7 +1007,8 @@ class RouteFollower(Node):
                        self.avoidance_cte_samples, default=0.0),
                    'avoidance_mean_cte_m': statistics.fmean(
                        self.avoidance_cte_samples)
-                       if self.avoidance_cte_samples else 0.0}
+                       if self.avoidance_cte_samples else 0.0,
+                   'completed_avoidances': self.completed_avoidances}
         if result is not None:
             payload.update({'nearest_index': result.nearest_index,
                             'lookahead_index': result.lookahead_index,

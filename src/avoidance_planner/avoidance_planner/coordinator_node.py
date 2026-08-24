@@ -60,7 +60,11 @@ class AvoidanceCoordinator(Node):
             'max_cluster_gap_far_m': 0.20,
             'adaptive_gap_distance_m': 8.0, 'confirmation_frames': 3,
             'lost_frames': 5, 'scan_timeout_sec': 0.30,
-            'tf_lookup_timeout_sec': 0.25,
+            # Candidate validation is deliberately synchronous and can take a
+            # few seconds.  TF callbacks queued during that computation must
+            # be allowed to catch up before exact-stamp scans are classified
+            # as failed.
+            'tf_lookup_timeout_sec': 5.0,
             'association_distance_m': 0.45,
             'velocity_filter_alpha': 0.35,
             'dynamic_enter_speed_mps': 0.15,
@@ -178,7 +182,9 @@ class AvoidanceCoordinator(Node):
             int(self.p['dynamic_confirmation_frames']),
             int(self.p['static_confirmation_frames']),
             int(self.p['dynamic_min_observations']))
-        self.debounce = ReplanDebounce(int(self.p['confirmation_frames']))
+        self.debounce = ReplanDebounce(
+            1 if bool(self.p['fixed_environment_mode']) else
+            int(self.p['confirmation_frames']))
         self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix='local_planner')
         self.future = None
         self.state = 'FOLLOWING_CSV'
@@ -327,7 +333,15 @@ class AvoidanceCoordinator(Node):
                     if math.hypot(track.x-self.selected_track.x,
                                   track.y-self.selected_track.y) <= 1.0:
                         self.passed_track_ids.add(track.track_id)
-            self.debounce = ReplanDebounce(int(self.p['confirmation_frames']))
+                self.get_logger().info('PASSED ' + json.dumps({
+                    'track_id': completed_track,
+                    'passed_track_ids': sorted(self.passed_track_ids),
+                    'passed_obstacle_s': self.passed_obstacle_s[-1]
+                    if self.passed_obstacle_s else None,
+                }, sort_keys=True))
+            self.debounce = ReplanDebounce(
+                1 if bool(self.p['fixed_environment_mode']) else
+                int(self.p['confirmation_frames']))
             # Associations accumulated while the vehicle follows a large
             # avoidance arc mix different visible faces of segmented curbs.
             # They are not valid motion evidence after CSV rejoin.  Start a
@@ -833,6 +847,19 @@ class AvoidanceCoordinator(Node):
                     self._set_state('DYNAMIC_OBSTACLE_STOP', 'dynamic obstacle intersects CSV path')
                     self.replan_pub.publish(Bool(data=True))
                 elif self.debounce.update(True, track.track_id):
+                    current = self._current_pose()
+                    twist = self.odom.twist.twist
+                    self.get_logger().info('STOP_TRIGGER ' + json.dumps({
+                        'track_id': track.track_id,
+                        'lidar_surface_distance_m': risk.lidar_surface_distance,
+                        'vehicle_x': current.x, 'vehicle_y': current.y,
+                        'vehicle_yaw': current.yaw,
+                        'obstacle_x': track.x, 'obstacle_y': track.y,
+                        'csv_index': self.route_nearest_index,
+                        'odom_linear_speed_mps': twist.linear.x,
+                        'odom_angular_speed_rps': twist.angular.z,
+                        'stamp_ns': self.get_clock().now().nanoseconds,
+                    }, sort_keys=True))
                     self._set_state('OBSTACLE_CONFIRMED', f'track={track.track_id}')
                     self._set_state('REPLAN_REQUIRED', f'track={track.track_id}')
                     self.replan_pub.publish(Bool(data=True))
@@ -874,6 +901,9 @@ class AvoidanceCoordinator(Node):
             obstacle = track_box(
                 self.selected_track, float(self.p['minimum_obstacle_depth_m']),
                 float(self.p['min_cluster_width_m']))
+            selected_projection = project_route(
+                self.route, self.selected_track.x, self.selected_track.y,
+                self.route_nearest_index)
             left_boundary, right_boundary = self._boundary_values()
             args = (
                 self.route, self._current_pose(), obstacle,
@@ -895,12 +925,19 @@ class AvoidanceCoordinator(Node):
                     self.p['rejoin_straight_extension_m']),
                 'minimum_index': self.route_nearest_index,
                 'collision_check_interval': float(self.p['collision_check_interval_m']),
-                'obstacle_surface_observation': True,
+                # Fixed-environment detections are complete SDF boxes, not a
+                # single LiDAR face. Preserve both their front face and actual
+                # d extent instead of shifting the box forward by half a body.
+                'obstacle_surface_observation': not bool(
+                    self.p['fixed_environment_mode']),
                 'obstacle_length': float(self.p['minimum_obstacle_depth_m']),
                 'obstacle_width': float(self.p['minimum_obstacle_width_m']),
                 'lateral_target_samples': int(self.p['lateral_target_samples']),
-                'expected_obstacle_lateral_center': float(
-                    self.p['expected_obstacle_lateral_center_m']),
+                # Fixed-map tracks contain the actual SDF box centre. Using
+                # the old nominal |d|=0.78 moved facility obstacle_1 from its
+                # measured d=0.61 outward and falsely approved a colliding
+                # near-centreline path.
+                'expected_obstacle_lateral_center': abs(selected_projection.d),
             }
             self.future = self.worker.submit(plan_candidates, *args, **kwargs)
             return
@@ -925,11 +962,19 @@ class AvoidanceCoordinator(Node):
                 self._set_state('PATH_READY', f'candidate={result.selected.candidate_id}')
                 selected = result.selected
                 self.get_logger().info('PATH_READY_METRICS ' + json.dumps({
+                    'track_id': self.selected_track.track_id,
                     'candidate_id': selected.candidate_id,
+                    'candidate_count': len(result.candidates),
+                    'valid_candidate_count': sum(
+                        candidate.valid for candidate in result.candidates),
+                    'path_length_m': selected.length,
+                    'max_curvature_1pm': selected.max_curvature,
                     'required_steering_deg': math.degrees(
                         selected.max_steering_rad),
                     'obstacle_clearance_m': selected.obstacle_clearance,
                     'curb_clearance_m': selected.curb_clearance,
+                    'terminal_curvature_error_1pm':
+                        selected.terminal_curvature_error,
                     'rejoin_index': selected.rejoin_index,
                 }, sort_keys=True))
 

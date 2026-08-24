@@ -19,7 +19,9 @@ avoidance_coordinator:
     confirmation_frames: 3
     lost_frames: 5
     scan_timeout_sec: 0.30
-    tf_lookup_timeout_sec: 0.25
+    # Full-footprint candidate validation can occupy the executor for >2 s.
+    # Retain scans until queued exact-stamp TF callbacks have caught up.
+    tf_lookup_timeout_sec: 5.0
     association_distance_m: 0.45
     velocity_filter_alpha: 0.35
     dynamic_enter_speed_mps: 0.15

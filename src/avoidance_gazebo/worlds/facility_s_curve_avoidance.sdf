@@ -3071,7 +3071,7 @@
 
     <model name="obstacle_1">
       <static>true</static>
-      <pose>10.180988 0.862285 0.075 0 0 0.387500</pose>
+      <pose>10.125837 1.023406 0.075 0 0 0.390551</pose>
       <link name="box_link">
           <collision name="collision">
             <geometry><box><size>1.30 0.78 0.15</size></box></geometry>
@@ -3084,7 +3084,7 @@
     </model>
     <model name="obstacle_2">
       <static>true</static>
-      <pose>10.468823 17.480728 0.075 0 0 1.177672</pose>
+      <pose>10.069913 17.641320 0.075 0 0 1.178156</pose>
       <link name="box_link">
           <collision name="collision">
             <geometry><box><size>1.30 0.78 0.15</size></box></geometry>
