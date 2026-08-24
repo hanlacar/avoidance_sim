@@ -135,8 +135,44 @@ def lookahead_point(points, projection, distance):
     # A target fixed at the final waypoint becomes singular as the vehicle
     # approaches it laterally.  Continue the lookahead along the declared
     # terminal heading; goal detection still uses the real final waypoint.
-    return (last.x + remaining*math.cos(last.yaw),
-            last.y + remaining*math.sin(last.yaw), len(points) - 1)
+    curvature = terminal_curvature(points)
+    if abs(curvature) <= 1.0e-6:
+        return (last.x + remaining*math.cos(last.yaw),
+                last.y + remaining*math.sin(last.yaw), len(points) - 1)
+    end_yaw = last.yaw+curvature*remaining
+    return (last.x+(math.sin(end_yaw)-math.sin(last.yaw))/curvature,
+            last.y+(math.cos(last.yaw)-math.cos(end_yaw))/curvature,
+            len(points)-1)
+
+
+def terminal_curvature(points):
+    """Signed terminal curvature averaged over up to the final 0.5 metre."""
+    if len(points) < 3:
+        return 0.0
+    last = points[-1]
+    distance = 0.0
+    first = last
+    for point, following in zip(reversed(points[:-1]), reversed(points[1:])):
+        distance += math.hypot(following.x-point.x, following.y-point.y)
+        first = point
+        if distance >= 0.5:
+            break
+    if distance > 1.0e-9 and hasattr(first, 'yaw') and hasattr(last, 'yaw'):
+        return normalize_angle(last.yaw-first.yaw)/distance
+    first, middle, last = points[-3:]
+    a = math.hypot(middle.x-first.x, middle.y-first.y)
+    b = math.hypot(last.x-middle.x, last.y-middle.y)
+    c = math.hypot(last.x-first.x, last.y-first.y)
+    cross = ((middle.x-first.x)*(last.y-first.y)-
+             (middle.y-first.y)*(last.x-first.x))
+    return 0.0 if a*b*c <= 1.0e-12 else 2.0*cross/(a*b*c)
+
+
+def curvature_at(points, index):
+    if len(points) < 3:
+        return 0.0
+    middle = max(1, min(int(index), len(points)-2))
+    return terminal_curvature(points[middle-1:middle+2])
 
 
 def pure_pursuit_steering(x, y, yaw, target_x, target_y,

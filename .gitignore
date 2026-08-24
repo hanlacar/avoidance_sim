@@ -9,6 +9,8 @@ routes/*.csv
 routes/*.yaml
 !routes/straight_reference.csv
 !routes/straight_reference.yaml
+!routes/s_curve_reference.csv
+!routes/s_curve_reference.yaml
 runtime_logs/
 verification_logs/
 .vscode/

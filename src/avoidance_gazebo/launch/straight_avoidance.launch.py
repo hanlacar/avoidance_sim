@@ -26,6 +26,8 @@ def _launch_course(context):
     if spawn_text not in ('true', 'false', '1', '0', 'yes', 'no', 'on', 'off'):
         raise ValueError('spawn_obstacles must be true or false')
     spawn_obstacles = spawn_text in ('true', '1', 'yes', 'on')
+    use_rviz = LaunchConfiguration('use_rviz').perform(context).strip().lower()
+    headless = use_rviz not in ('true', '1', 'yes', 'on')
     seed = int(seed_text)
     layout = generate_layout(seed)
     (first_x, first_y), (second_x, second_y) = layout.ordered
@@ -57,7 +59,7 @@ def _launch_course(context):
 
     gz = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(ros_gz_sim, 'launch', 'gz_sim.launch.py')),
-        launch_arguments={'gz_args': f'-r {generated_world}'}.items(),
+        launch_arguments={'gz_args': f'-r {"-s " if headless else ""}{generated_world}'}.items(),
     )
 
     robot_description = Command(['xacro ', xacro_file])

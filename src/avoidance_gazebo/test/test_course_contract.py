@@ -14,6 +14,12 @@ def test_launch_defaults_to_obstacle_free_mode():
     assert "for name in ('obstacle_1', 'obstacle_2')" in launch
 
 
+def test_headless_mode_uses_gazebo_server_only():
+    launch = (ROOT / 'launch' / 'straight_avoidance.launch.py').read_text()
+    assert "headless = use_rviz not in" in launch
+    assert 'gz_args' in launch and '"-s "' in launch
+
+
 def test_world_has_expected_obstacle_templates():
     world = (ROOT / 'worlds' / 'straight_avoidance.sdf').read_text()
     assert len(re.findall(r'<model name="obstacle_[12]">', world)) == 2
@@ -92,12 +98,12 @@ def test_launch_has_single_simulator_domain_lock():
         assert process in guard
 
 
-def test_routes_directory_has_exactly_one_reference_csv_and_yaml():
+def test_routes_directory_has_separate_straight_and_s_references():
     routes = ROOT.parents[1] / 'routes'
     csv_files = sorted(p.name for p in routes.glob('*.csv'))
     yaml_files = sorted(p.name for p in routes.glob('*.yaml'))
-    assert csv_files == ['straight_reference.csv']
-    assert yaml_files == ['straight_reference.yaml']
+    assert csv_files == ['s_curve_reference.csv', 'straight_reference.csv']
+    assert yaml_files == ['s_curve_reference.yaml', 'straight_reference.yaml']
 
 
 def test_fixed_obstacle_seed_is_reproducible():

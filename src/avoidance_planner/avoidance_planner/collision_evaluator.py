@@ -3,7 +3,8 @@
 from dataclasses import dataclass
 import math
 
-from .geometry import Box2, footprint_collision
+from .geometry import Box2, footprint_frenet_bounds, boxes_intersect
+from .local_planner import observed_surface_to_frenet_box, project_route
 
 
 @dataclass(frozen=True)
@@ -46,34 +47,51 @@ def evaluate_track_collision(path, current_pose, track, vehicle_length,
                              longitudinal_safety, monitor_distance,
                              emergency_distance, left_boundary,
                              right_boundary, minimum_obstacle_depth=0.15,
-                             previous_index=0, lidar_x_offset=0.65):
+                             previous_index=0, lidar_x_offset=0.65,
+                             minimum_obstacle_width=0.08):
     """Sweep the full rectangular vehicle footprint along remaining poses."""
     if not path:
         return CollisionRisk(False, 0, -1, math.inf, False)
     nearest = nearest_path_index(path, current_pose.x, current_pose.y, previous_index)
     lengths = cumulative_lengths(path)
     raw_obstacle = track_box(track, minimum_obstacle_depth)
-    obstacle = raw_obstacle.inflated(longitudinal_safety, lateral_safety)
+    local_raw_obstacle = observed_surface_to_frenet_box(
+        path, raw_obstacle, nearest, minimum_obstacle_depth,
+        minimum_obstacle_width, left_boundary, right_boundary)
+    # Before stopping, a narrow return may be an inner face, an outer face,
+    # or a side corner.  Collision relevance must cover that unresolved
+    # centreward placement.  The stopped planner separately uses the single
+    # physical-width best estimate and never shrinks its footprint/margins.
+    if local_raw_obstacle.min_y >= 0.0:
+        possible_obstacle = Box2(
+            local_raw_obstacle.min_x, local_raw_obstacle.max_x,
+            local_raw_obstacle.min_y-minimum_obstacle_width,
+            local_raw_obstacle.max_y)
+    elif local_raw_obstacle.max_y <= 0.0:
+        possible_obstacle = Box2(
+            local_raw_obstacle.min_x, local_raw_obstacle.max_x,
+            local_raw_obstacle.min_y,
+            local_raw_obstacle.max_y+minimum_obstacle_width)
+    else:
+        possible_obstacle = local_raw_obstacle
+    obstacle = possible_obstacle.inflated(
+        longitudinal_safety, lateral_safety)
     collision_index = -1
     for index in range(nearest, len(path)):
         forward = lengths[index]-lengths[nearest]
         if forward > monitor_distance:
             break
-        if footprint_collision(path[index], vehicle_length, vehicle_width,
-                               center_offset, (obstacle,), left_boundary,
-                               right_boundary):
+        footprint, _ = footprint_frenet_bounds(
+            path[index], path, vehicle_length, vehicle_width, center_offset,
+            max(nearest, index-3))
+        if (footprint.max_y > left_boundary or footprint.min_y < right_boundary or
+                boxes_intersect(footprint, obstacle)):
             collision_index = index
             break
     distance = math.hypot(track.x-current_pose.x, track.y-current_pose.y)
     ahead = lengths[collision_index]-lengths[nearest] if collision_index >= 0 else math.inf
-    c, s = math.cos(current_pose.yaw), math.sin(current_pose.yaw)
-    corners = ((raw_obstacle.min_x, raw_obstacle.min_y),
-               (raw_obstacle.min_x, raw_obstacle.max_y),
-               (raw_obstacle.max_x, raw_obstacle.min_y),
-               (raw_obstacle.max_x, raw_obstacle.max_y))
-    forward_edges = tuple((x-current_pose.x)*c+(y-current_pose.y)*s
-                          for x, y in corners)
-    surface_from_base = min(forward_edges)
+    current_s = project_route(path, current_pose.x, current_pose.y, nearest).s
+    surface_from_base = local_raw_obstacle.min_x-current_s
     lidar_surface = surface_from_base-lidar_x_offset
     vehicle_front_surface = surface_from_base-vehicle_length/2.0-center_offset
     return CollisionRisk(collision_index >= 0, nearest, collision_index,

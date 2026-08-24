@@ -1,0 +1,8 @@
+format_version: 1
+origin_lat: 0.0
+origin_lon: 0.0
+loop: false
+coordinate_source: gazebo_odometry
+yaw_unit: radian
+generator: avoidance_gazebo.s_curve_course
+spacing_m: 0.10

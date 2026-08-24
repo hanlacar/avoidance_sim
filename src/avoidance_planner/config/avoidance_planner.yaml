@@ -38,6 +38,8 @@ avoidance_coordinator:
     obstacle_safety_lateral_m: 0.20
     obstacle_safety_longitudinal_m: 0.15
     minimum_obstacle_depth_m: 0.65
+    minimum_obstacle_width_m: 0.39
+    expected_obstacle_lateral_center_m: 0.78
     curb_safety_m: 0.08
     left_curb_inner_y_m: 1.095
     right_curb_inner_y_m: -1.095
@@ -50,8 +52,10 @@ avoidance_coordinator:
     stopped_confirmation_sec: 0.30
     path_sample_interval_m: 0.05
     collision_check_interval_m: 0.02
-    return_transition_lengths_m: [2.0, 2.5, 3.0]
+    return_transition_lengths_m: [2.0, 2.5, 3.0, 3.5, 4.0]
     rejoin_straight_extension_m: 2.0
     corridor_candidate_fractions: [0.25, 0.50, 0.75, 0.80, 0.85, 0.90]
+    adaptive_candidate_sampling: true
+    lateral_target_samples: 7
     marker_lifetime_sec: 2.0
     planning_rate_hz: 10.0

@@ -207,6 +207,11 @@ Visualization Manager:
       Enabled: true
       Topic:
         Value: /avoidance/obstacle_status
+    - Class: rviz_default_plugins/MarkerArray
+      Name: CSV Tangent Normal And Frenet Status
+      Enabled: true
+      Topic:
+        Value: /avoidance/route/local_frenet_frame
   Tools:
     - Class: rviz_default_plugins/Interact
     - Class: rviz_default_plugins/MoveCamera

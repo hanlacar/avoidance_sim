@@ -1,6 +1,6 @@
 # avoidance_sim_ws
 
-Ubuntu 24.04, ROS 2 Jazzy, Gazebo Sim Harmonic용 직선도로 LiDAR 인지·경로 기록·2 m 정지 및 자동 반복 회피 주행 환경이다. 단일 `straight_reference.csv`를 최초 서비스 호출 한 번으로 끝까지 주행하며, 장애물을 만날 때마다 정지·회피 경로 생성·자동 회피 주행·CSV 복귀를 서비스 재호출 없이 반복한다. 모든 ROS 실행은 CycloneDDS와 `ROS_DOMAIN_ID=12`를 사용한다.
+Ubuntu 24.04, ROS 2 Jazzy, Gazebo Sim Harmonic용 직선·S자 도로 LiDAR 인지·경로 기록·2 m 정지 및 자동 반복 회피 주행 환경이다. 선택한 기준 CSV를 최초 서비스 호출 한 번으로 끝까지 주행하며, 장애물을 만날 때마다 정지·회피 경로 생성·자동 회피 주행·CSV 복귀를 서비스 재호출 없이 반복한다. 모든 ROS 실행은 CycloneDDS와 `ROS_DOMAIN_ID=12`를 사용한다.
 
 ## 의존성과 빌드
 
@@ -170,3 +170,59 @@ ros2 service call /avoidance/stop std_srvs/srv/Trigger "{}"
 ```
 
 GPS 주행 계약은 `/gps_drive=2.00`과 `/gps_wheel`, 회피 주행 계약은 `/lidar_drive=1.00`과 `/lidar_wheel`이며 정지 시 `control_source=STOP`으로 두 쌍 모두 0이다. `/avoidance/control_source`는 `GPS`, `LIDAR`, `STOP` 중 하나이고 두 쌍이 섞이지 않는다. 선택/실제 회피 경로는 `/avoidance/selected_path`, `/avoidance/actual_avoidance_path`에서, 장애물별 상태(`UNSEEN/TRACKED/PLANNING/AVOIDING/PASSED`)는 `/avoidance/obstacle_status`와 `/avoidance/planner_status`의 `obstacle_statuses`에서 확인한다. `obstacle_seed:=-1`은 시스템 난수와 직전 배치 비교를 사용하고, 0 이상은 재현 테스트 전용이다. 설정은 `avoidance_planner/config/avoidance_planner.yaml`, `avoidance_route/config/route_follower.yaml`에 있다.
+
+## S자 코스 자동 회피
+
+S자 중심선은 양 끝에서 위치·heading·curvature가 짧은 접선 구간과 연속인 해석적 C2 곡선이다. 도로·흰선·연석은 이 중심선의 local normal offset으로 생성되며, 기준 경로 `routes/s_curve_reference.csv`는 odom 원점부터 약 0.10 m 간격으로 저장돼 있다. 공통 planner는 직선/S자 모두 CSV local Frenet `(s,d)`를 사용한다.
+
+터미널 1:
+
+```bash
+cd ~/avoidance_sim_ws
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+export ROS_DOMAIN_ID=12
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+
+ros2 daemon stop
+ros2 daemon start
+
+ros2 launch avoidance_gazebo s_curve_planning.launch.py \
+  route_file:=$HOME/avoidance_sim_ws/routes/s_curve_reference.csv \
+  spawn_obstacles:=true \
+  obstacle_seed:=-1 \
+  use_rviz:=true \
+  auto_start:=false \
+  planner_enabled:=true \
+  auto_start_avoidance:=true \
+  replan_trigger_distance_m:=2.0 \
+  max_steering_deg:=25.0
+```
+
+터미널 2:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ~/avoidance_sim_ws/install/setup.bash
+export ROS_DOMAIN_ID=12
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ros2 topic echo /avoidance/planner_status
+```
+
+터미널 3 — 최초 한 번만 실행:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ~/avoidance_sim_ws/install/setup.bash
+export ROS_DOMAIN_ID=12
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ros2 service call /avoidance/route/start std_srvs/srv/Trigger "{}"
+```
+
+장애물 없는 기준 추종은 터미널 1 명령에서 `spawn_obstacles:=false`로 바꾼다. 코스 asset을 다시 생성해야 할 때만 다음 결정론적 명령을 사용하며, launch 중에는 파일을 다시 만들지 않는다.
+
+```bash
+cd ~/avoidance_sim_ws
+PYTHONPATH=src/avoidance_gazebo python3 -c \
+  "from avoidance_gazebo.s_curve_course import write_assets; write_assets('.')"
+```

@@ -30,9 +30,10 @@ from visualization_msgs.msg import Marker, MarkerArray
 from .collision_evaluator import (
     ReplanDebounce, evaluate_track_collision, track_box)
 from .geometry import Pose2
-from .local_planner import plan_candidates
+from .local_planner import (interpolate_route, plan_candidates, project_route,
+                            route_lengths)
 from .perception import (
-    DYNAMIC_OBSTACLE, STATIC_OBSTACLE, TrackManager, ScanPoint,
+    DYNAMIC_OBSTACLE, STATIC_OBSTACLE, LineFeature, TrackManager, ScanPoint,
     cluster_groups, split_walls_and_objects, preprocess_scan)
 
 
@@ -75,6 +76,8 @@ class AvoidanceCoordinator(Node):
             'obstacle_safety_lateral_m': 0.20,
             'obstacle_safety_longitudinal_m': 0.15,
             'minimum_obstacle_depth_m': 0.65,
+            'minimum_obstacle_width_m': 0.39,
+            'expected_obstacle_lateral_center_m': 0.78,
             'curb_safety_m': 0.08, 'left_curb_inner_y_m': 1.095,
             'right_curb_inner_y_m': -1.095,
             'obstacle_monitor_distance_m': 5.0,
@@ -89,6 +92,8 @@ class AvoidanceCoordinator(Node):
             'return_transition_lengths_m': [2.0, 2.5, 3.0],
             'rejoin_straight_extension_m': 1.0,
             'corridor_candidate_fractions': [0.25, 0.50, 0.75, 0.80, 0.85, 0.90],
+            'adaptive_candidate_sampling': True,
+            'lateral_target_samples': 7,
             'marker_lifetime_sec': 2.0, 'planning_rate_hz': 20.0,
             'clock_forward_jump_threshold_s': 2.0,
             'clock_reset_threshold_s': 1.0,
@@ -186,6 +191,8 @@ class AvoidanceCoordinator(Node):
         self.selected_track = None
         self.avoidance_started = False
         self.passed_track_ids = set()
+        self.path_relevant_track_ids = set()
+        self.passed_obstacle_s = []
         self.last_front_scan_time = None
         self.last_rear_scan_time = None
         self.last_front_scan_stamp_ns = None
@@ -211,6 +218,8 @@ class AvoidanceCoordinator(Node):
             'total_planning_ms': 0.0, 'cpu_percent': 0.0,
             'effective_scan_hz': 0.0}
         self.last_plan_summary = {}
+        self.last_track_decisions = []
+        self.track_decision_states = {}
         self.last_scan_wall = None
         self.last_scan_stamp = None
         self.last_tick_time = None
@@ -255,6 +264,23 @@ class AvoidanceCoordinator(Node):
         return math.atan2(2.0*(q.w*q.z+q.x*q.y),
                           1.0-2.0*(q.y*q.y+q.z*q.z))
 
+    def _is_passed_obstacle_face(self, route_s):
+        return any(abs(route_s-passed_s) <= 1.5
+                   for passed_s in getattr(self, 'passed_obstacle_s', ()))
+
+    def _is_beyond_route_goal(self, track):
+        """Return true when an entire obstacle is beyond the drivable CSV."""
+        if len(self.route) < 2:
+            return False
+        goal, previous = self.route[-1], self.route[-2]
+        yaw = math.atan2(goal.y-previous.y, goal.x-previous.x)
+        forward = ((track.x-goal.x)*math.cos(yaw) +
+                   (track.y-goal.y)*math.sin(yaw))
+        required = (float(self.p['vehicle_length_m'])/2.0 +
+                    float(self.p['minimum_obstacle_depth_m'])/2.0 +
+                    float(self.p['obstacle_safety_longitudinal_m']))
+        return forward > required
+
     def _odom(self, msg):
         stamp_ns = Time.from_msg(msg.header.stamp).nanoseconds
         if self._stamp_regressed('odom', stamp_ns, self.last_odom_stamp_ns):
@@ -279,13 +305,41 @@ class AvoidanceCoordinator(Node):
             completed_track = self.selected_track.track_id if self.selected_track else -1
             if completed_track >= 0:
                 self.passed_track_ids.add(completed_track)
+                route = getattr(self, 'route', ())
+                if len(route) >= 2 and hasattr(self.selected_track, 'x'):
+                    completed = project_route(
+                        route, self.selected_track.x, self.selected_track.y, 0)
+                    if not hasattr(self, 'passed_obstacle_s'):
+                        self.passed_obstacle_s = []
+                    self.passed_obstacle_s.append(completed.s)
+                # A box may be observed as separate front/side face tracks.
+                # Mark colocated faces together so one physical obstacle is
+                # never planned twice after CSV rejoin.
+                for track in getattr(self, 'tracks', ()):
+                    if math.hypot(track.x-self.selected_track.x,
+                                  track.y-self.selected_track.y) <= 1.0:
+                        self.passed_track_ids.add(track.track_id)
             self.debounce = ReplanDebounce(int(self.p['confirmation_frames']))
             self.selected_track = None
             self.future = None
             self.avoidance_started = False
+            if hasattr(self, '_clear_completed_plan'):
+                self._clear_completed_plan()
             self.replan_pub.publish(Bool(data=False))
             self._set_state('FOLLOWING_CSV',
                             f'avoidance complete for track={completed_track}')
+
+    def _clear_completed_plan(self):
+        self.candidate_pub.publish(self._clear_array())
+        self.planning_points_pub.publish(self._clear_array())
+        empty_path = Path()
+        empty_path.header.frame_id = str(self.p['target_frame'])
+        empty_path.header.stamp = self.get_clock().now().to_msg()
+        self.selected_path_pub.publish(empty_path)
+        corridor = self._marker('safe_corridor', 0, Marker.CUBE)
+        corridor.action = Marker.DELETE
+        self.corridor_pub.publish(corridor)
+        self.selected_path_msg = None
 
     def _front_scan(self, scan):
         stamp_ns = Time.from_msg(scan.header.stamp).nanoseconds
@@ -409,12 +463,15 @@ class AvoidanceCoordinator(Node):
                        if len(group) >= int(self.p['min_cluster_points']))
         self.performance['clustering_ms'] = (time.perf_counter()-cluster_started)*1000.0
         wall_started = time.perf_counter()
+        curved_walls = ()
         route_heading = self._current_pose().yaw if self.odom else 0.0
         walls, detections, unknown = split_walls_and_objects(
             groups, route_heading, float(self.p['wall_min_length_m']),
             float(self.p['wall_max_residual_m']),
             math.radians(float(self.p['wall_parallel_tolerance_deg'])),
             float(self.p['min_cluster_width_m']))
+        walls = tuple(curved_walls)+tuple(walls)
+        walls, detections = self._classify_curved_boundaries(walls, detections)
         self.performance['wall_detection_ms'] = (time.perf_counter()-wall_started)*1000.0
         self.wall_hits = self.wall_hits+1 if walls else 0
         self.walls = tuple(walls) if self.wall_hits >= int(self.p['confirmation_frames']) else ()
@@ -425,6 +482,29 @@ class AvoidanceCoordinator(Node):
         self.performance['scan_processing_ms'] = (time.perf_counter()-started)*1000.0
         self.scan_count += 1
         self._publish_perception(scan.header.stamp)
+
+    def _classify_curved_boundaries(self, walls, detections):
+        """Keep curved curb returns out of obstacle tracking using route d."""
+        if len(self.route) < 2:
+            return tuple(walls), tuple(detections)
+        kept = []
+        curved_walls = list(walls)
+        lengths = route_lengths(self.route)
+        for detection in detections:
+            projection = project_route(
+                self.route, detection.x, detection.y, self.route_nearest_index)
+            if detection.width >= 1.50:
+                x, y, yaw = interpolate_route(self.route, lengths, projection.s)
+                x -= projection.d*math.sin(yaw)
+                y += projection.d*math.cos(yaw)
+                half = detection.width/2.0
+                curved_walls.append(LineFeature(
+                    x-half*math.cos(yaw), y-half*math.sin(yaw),
+                    x+half*math.cos(yaw), y+half*math.sin(yaw),
+                    yaw, detection.width, 0.0))
+            else:
+                kept.append(detection)
+        return tuple(curved_walls), tuple(kept)
 
     def _current_pose(self):
         pose = self.odom.pose.pose
@@ -541,10 +621,47 @@ class AvoidanceCoordinator(Node):
             return
         pose = self._current_pose()
         risks = []
+        track_decisions = []
         for track in self.tracks:
             if track.state not in (STATIC_OBSTACLE, DYNAMIC_OBSTACLE):
+                track_decisions.append({
+                    'track_id': track.track_id, 'decision': 'UNCONFIRMED',
+                    'state': track.state, 'x': track.x, 'y': track.y})
                 continue
             if track.track_id in self.passed_track_ids:
+                track_decisions.append({
+                    'track_id': track.track_id, 'decision': 'PASSED_ID',
+                    'state': track.state, 'x': track.x, 'y': track.y})
+                continue
+            track_projection = project_route(
+                self.route, track.x, track.y, self.route_nearest_index)
+            if self._is_beyond_route_goal(track):
+                track_decisions.append({
+                    'track_id': track.track_id,
+                    'decision': 'BEYOND_ROUTE_GOAL',
+                    'state': track.state, 's': track_projection.s,
+                    'd': track_projection.d, 'x': track.x, 'y': track.y})
+                continue
+            # A curved box is commonly split into new front/side LiDAR tracks
+            # after rejoin.  Track IDs are transient, so suppress every face
+            # in the already-passed physical obstacle's longitudinal band.
+            if self._is_passed_obstacle_face(track_projection.s):
+                self.passed_track_ids.add(track.track_id)
+                track_decisions.append({
+                    'track_id': track.track_id, 'decision': 'PASSED_S_BAND',
+                    'state': track.state, 's': track_projection.s,
+                    'd': track_projection.d, 'x': track.x, 'y': track.y})
+                continue
+            # A finite curved-curb chord projects slightly inside its true
+            # Frenet offset.  Keep a classification band around |d|=1.095;
+            # real course obstacles at |d|=0.78 remain well outside it.
+            curb_band = 0.16
+            if (track_projection.d >= float(self.p['left_curb_inner_y_m'])-curb_band or
+                    track_projection.d <= float(self.p['right_curb_inner_y_m'])+curb_band):
+                track_decisions.append({
+                    'track_id': track.track_id, 'decision': 'CURB_BAND',
+                    'state': track.state, 's': track_projection.s,
+                    'd': track_projection.d, 'x': track.x, 'y': track.y})
                 continue
             risk = evaluate_track_collision(
                 self.route, pose, track, float(self.p['vehicle_length_m']),
@@ -557,10 +674,31 @@ class AvoidanceCoordinator(Node):
                 float(self.p['left_curb_inner_y_m']),
                 float(self.p['right_curb_inner_y_m']),
                 float(self.p['minimum_obstacle_depth_m']), self.route_nearest_index,
-                float(self.p['front_lidar_x_offset_m']))
+                float(self.p['front_lidar_x_offset_m']),
+                float(self.p['minimum_obstacle_width_m']))
             self.route_nearest_index = max(self.route_nearest_index, risk.nearest_path_index)
             if risk.required:
-                risks.append((risk.longitudinal_distance, track, risk))
+                self.path_relevant_track_ids.add(track.track_id)
+            remembered_risk = track.track_id in self.path_relevant_track_ids
+            track_decisions.append({
+                'track_id': track.track_id,
+                'decision': ('COLLISION_RISK' if risk.required else
+                             ('LATCHED_COLLISION_RISK' if remembered_risk else
+                              'NO_COLLISION_RISK')),
+                'state': track.state, 's': track_projection.s,
+                'd': track_projection.d, 'x': track.x, 'y': track.y,
+                'lidar_surface_distance_m': risk.lidar_surface_distance,
+                'collision_path_index': risk.collision_path_index})
+            if remembered_risk:
+                risks.append((risk.lidar_surface_distance, track, risk))
+        self.last_track_decisions = track_decisions
+        for decision in track_decisions:
+            track_id = decision['track_id']
+            signature = (decision['state'], decision['decision'])
+            if self.track_decision_states.get(track_id) != signature:
+                self.track_decision_states[track_id] = signature
+                self.get_logger().info(
+                    'TRACK_DECISION ' + json.dumps(decision, sort_keys=True))
         if risks:
             distance, track, risk = min(risks, key=lambda item: item[0])
             self.nearest_distance_pub.publish(Float32(data=float(distance)))
@@ -619,7 +757,8 @@ class AvoidanceCoordinator(Node):
             self._set_state('GENERATING_CANDIDATES', '')
             self.planning_started_wall = time.perf_counter()
             obstacle = track_box(
-                self.selected_track, float(self.p['minimum_obstacle_depth_m']))
+                self.selected_track, float(self.p['minimum_obstacle_depth_m']),
+                float(self.p['min_cluster_width_m']))
             left_boundary, right_boundary = self._boundary_values()
             args = (
                 self.route, self._current_pose(), obstacle,
@@ -634,12 +773,19 @@ class AvoidanceCoordinator(Node):
                 'obstacle_safety_longitudinal': float(self.p['obstacle_safety_longitudinal_m']),
                 'curb_safety': float(self.p['curb_safety_m']),
                 'sample_interval': float(self.p['path_sample_interval_m']),
-                'target_fractions': tuple(self.p['corridor_candidate_fractions']),
+                'target_fractions': (() if self.p['adaptive_candidate_sampling'] else
+                                     tuple(self.p['corridor_candidate_fractions'])),
                 'return_lengths': tuple(self.p['return_transition_lengths_m']),
                 'rejoin_straight_extension': float(
                     self.p['rejoin_straight_extension_m']),
                 'minimum_index': self.route_nearest_index,
                 'collision_check_interval': float(self.p['collision_check_interval_m']),
+                'obstacle_surface_observation': True,
+                'obstacle_length': float(self.p['minimum_obstacle_depth_m']),
+                'obstacle_width': float(self.p['minimum_obstacle_width_m']),
+                'lateral_target_samples': int(self.p['lateral_target_samples']),
+                'expected_obstacle_lateral_center': float(
+                    self.p['expected_obstacle_lateral_center_m']),
             }
             self.future = self.worker.submit(plan_candidates, *args, **kwargs)
             return
@@ -662,6 +808,15 @@ class AvoidanceCoordinator(Node):
                 self._set_state('PATH_INFEASIBLE', 'no collision-free <=25 deg candidate')
             else:
                 self._set_state('PATH_READY', f'candidate={result.selected.candidate_id}')
+                selected = result.selected
+                self.get_logger().info('PATH_READY_METRICS ' + json.dumps({
+                    'candidate_id': selected.candidate_id,
+                    'required_steering_deg': math.degrees(
+                        selected.max_steering_rad),
+                    'obstacle_clearance_m': selected.obstacle_clearance,
+                    'curb_clearance_m': selected.curb_clearance,
+                    'rejoin_index': selected.rejoin_index,
+                }, sort_keys=True))
 
     def _watchdog(self):
         if self.last_front_scan_time is None:
@@ -686,9 +841,12 @@ class AvoidanceCoordinator(Node):
     def _boundary_values(self):
         configured_left = float(self.p['left_curb_inner_y_m'])
         configured_right = float(self.p['right_curb_inner_y_m'])
-        midpoints = [0.5*(wall.y1+wall.y2) for wall in self.walls]
-        left = [value for value in midpoints if value > 0.0]
-        right = [value for value in midpoints if value < 0.0]
+        midpoints = [(0.5*(wall.x1+wall.x2), 0.5*(wall.y1+wall.y2))
+                     for wall in self.walls]
+        lateral = [project_route(self.route, x, y, self.route_nearest_index).d
+                   for x, y in midpoints] if len(self.route) >= 2 else []
+        left = [value for value in lateral if value > 0.0]
+        right = [value for value in lateral if value < 0.0]
         if left and right:
             self.boundary_source = 'lidar_confirmed_walls'
             return (min(left, key=lambda value: abs(value-configured_left)),
@@ -808,6 +966,24 @@ class AvoidanceCoordinator(Node):
             'max_candidate_steering_deg': max(
                 (math.degrees(item.max_steering_rad)
                  for item in result.candidates), default=0.0),
+            'candidates': [{
+                'candidate_id': item.candidate_id,
+                'entry_length_m': item.entry_length,
+                'lateral_offset_m': item.target_d,
+                'hold_length_m': item.hold_length,
+                'return_length_m': item.return_length,
+                'rejoin_index': item.rejoin_index,
+                'max_curvature_1pm': item.max_curvature,
+                'max_steering_deg': math.degrees(item.max_steering_rad),
+                'obstacle_clearance_m': item.obstacle_clearance,
+                'curb_clearance_m': item.curb_clearance,
+                'collision_path_index': item.collision_path_index,
+                'collision_pose': (None if item.collision_pose is None else {
+                    'x': item.collision_pose.x, 'y': item.collision_pose.y,
+                    'yaw': item.collision_pose.yaw}),
+                'collision_target': item.collision_target or None,
+                'rejection_reason': item.reason or None,
+            } for item in result.candidates],
         }
         if result.selected is not None:
             self.last_plan_summary.update({
@@ -816,13 +992,28 @@ class AvoidanceCoordinator(Node):
                 'selected_max_steering_deg': math.degrees(
                     result.selected.max_steering_rad),
                 'selected_max_curvature_rate': result.selected.max_curvature_rate,
+                'rejoin_curvature_error': result.selected.terminal_curvature_error,
             })
         self.planning_time_pub.publish(Float32(data=float(elapsed_ms)))
-        obstacle = track_box(self.selected_track, float(self.p['minimum_obstacle_depth_m']))
+        obstacle = track_box(
+            self.selected_track, float(self.p['minimum_obstacle_depth_m']),
+            float(self.p['minimum_obstacle_width_m']))
         corridor = self._marker('safe_corridor', 0, Marker.CUBE)
-        corridor.pose.position.x = 0.5*(obstacle.min_x+obstacle.max_x)
-        corridor.pose.position.y = 0.5*(result.corridor.lower_center_d+result.corridor.upper_center_d)
+        obstacle_center_x = 0.5*(obstacle.min_x+obstacle.max_x)
+        obstacle_center_y = 0.5*(obstacle.min_y+obstacle.max_y)
+        obstacle_projection = project_route(
+            self.route, obstacle_center_x, obstacle_center_y,
+            self.route_nearest_index)
+        route_lengths_value = route_lengths(self.route)
+        route_x, route_y, route_yaw = interpolate_route(
+            self.route, route_lengths_value, obstacle_projection.s)
+        corridor_d = 0.5*(result.corridor.lower_center_d+
+                         result.corridor.upper_center_d)
+        corridor.pose.position.x = route_x-corridor_d*math.sin(route_yaw)
+        corridor.pose.position.y = route_y+corridor_d*math.cos(route_yaw)
         corridor.pose.position.z = 0.025
+        corridor.pose.orientation.z = math.sin(route_yaw/2.0)
+        corridor.pose.orientation.w = math.cos(route_yaw/2.0)
         corridor.scale.x = obstacle.max_x-obstacle.min_x+1.6
         corridor.scale.y = max(0.001, result.corridor.width)
         corridor.scale.z = 0.05
@@ -907,12 +1098,20 @@ class AvoidanceCoordinator(Node):
             x = track.x if track is not None else (
                 self.selected_track.x if self.selected_track and
                 self.selected_track.track_id == track_id else math.inf)
-            entries.append({'track_id': track_id, 'status': status, '_sort_x': x,
-                            'x': x if math.isfinite(x) else None})
-        entries.sort(key=lambda item: item['_sort_x'])
+            y = getattr(track, 'y', 0.0) if track is not None else (
+                getattr(self.selected_track, 'y', 0.0) if self.selected_track and
+                self.selected_track.track_id == track_id else math.inf)
+            route = getattr(self, 'route', ())
+            route_s = (project_route(route, x, y, 0).s
+                       if math.isfinite(x) and math.isfinite(y) and len(route) >= 2
+                       else x)
+            entries.append({'track_id': track_id, 'status': status, '_sort_s': route_s,
+                            'x': x if math.isfinite(x) else None,
+                            'y': y if math.isfinite(y) else None, 's': route_s})
+        entries.sort(key=lambda item: item['_sort_s'])
         for order, entry in enumerate(entries, start=1):
             entry['label'] = f'obstacle_{order}'
-            del entry['_sort_x']
+            del entry['_sort_s']
         return entries
 
     def _publish_obstacle_status(self, statuses):
@@ -921,6 +1120,7 @@ class AvoidanceCoordinator(Node):
             marker = self._marker(
                 'obstacle_status', entry['track_id'], Marker.TEXT_VIEW_FACING)
             marker.pose.position.x = entry['x'] if entry['x'] is not None else 0.0
+            marker.pose.position.y = entry['y'] if entry['y'] is not None else 0.0
             marker.pose.position.z = 1.6
             marker.scale.z = 0.18
             marker.color.r = marker.color.g = marker.color.b = marker.color.a = 1.0
@@ -956,6 +1156,7 @@ class AvoidanceCoordinator(Node):
             'drives_selected_path': False,
             'selected_path_driving_enabled': True,
             'last_plan_summary': self.last_plan_summary,
+            'last_track_decisions': self.last_track_decisions,
         }
         text = json.dumps(payload, sort_keys=True)
         self.status_pub.publish(String(data=text))

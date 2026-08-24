@@ -12,7 +12,8 @@ from avoidance_route.route_following import (
     REQUIRED_COLUMNS, RouteError, Waypoint, avoidance_rejoin_ready,
     compute_control, goal_reached,
     limit_steering, load_route_csv, lookahead_point, nearest_projection,
-    pure_pursuit_steering, safety_reason, start_pose_matches)
+    pure_pursuit_steering, safety_reason, start_pose_matches,
+    terminal_curvature)
 
 
 HEADER = ('index', 'x_m', 'y_m', 'yaw', 'direction', 'drive_level')
@@ -84,6 +85,21 @@ def test_lookahead_extends_terminal_heading_without_moving_real_goal():
     x, y, index = lookahead_point(points, projection, 1.2)
     assert (x, y, index) == pytest.approx((6.0, 0.0, 5))
     assert points[-1].x == pytest.approx(5.0)
+
+
+def test_curved_terminal_lookahead_continues_csv_curvature():
+    radius = 5.0
+    points = tuple(Waypoint(i, radius*math.sin(i*0.02),
+                            radius*(1.0-math.cos(i*0.02)), i*0.02,
+                            1, 2.0) for i in range(6))
+    curvature = terminal_curvature(points)
+    assert curvature == pytest.approx(1.0/radius, rel=1.0e-4)
+    projection = nearest_projection(points, points[-1].x, points[-1].y)
+    x, y, _ = lookahead_point(points, projection, 1.0)
+    expected_yaw = points[-1].yaw+curvature
+    assert x == pytest.approx(points[-1].x+(math.sin(expected_yaw)-
+                              math.sin(points[-1].yaw))/curvature)
+    assert y > points[-1].y
 
 
 def test_straight_route_steering_near_zero():

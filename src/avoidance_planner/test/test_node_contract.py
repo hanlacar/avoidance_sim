@@ -40,6 +40,12 @@ def test_dynamic_to_static_transition_cannot_return_to_latched_csv_deadlock():
     assert "self._set_state('FOLLOWING_CSV'" not in stationary_block
 
 
+def test_confirmed_path_intersection_is_latched_until_track_is_passed():
+    source = __import__('inspect').getsource(AvoidanceCoordinator._tick)
+    assert 'self.path_relevant_track_ids.add(track.track_id)' in source
+    assert "'LATCHED_COLLISION_RISK'" in source
+
+
 def test_rejoin_extension_gives_rate_limited_follower_settling_distance():
     config = yaml.safe_load((Path(__file__).parents[1] / 'config' /
                              'avoidance_planner.yaml').read_text())
@@ -90,6 +96,24 @@ def test_completed_track_is_marked_passed_and_excluded_from_status():
         passed_track_ids=set(), _set_state=Mock())
     AvoidanceCoordinator._control_source(fake, SimpleNamespace(data='GPS'))
     assert fake.passed_track_ids == {7}
+
+
+def test_new_lidar_face_of_passed_physical_obstacle_is_suppressed():
+    fake = SimpleNamespace(passed_obstacle_s=[8.0])
+    assert AvoidanceCoordinator._is_passed_obstacle_face(fake, 8.9)
+    assert not AvoidanceCoordinator._is_passed_obstacle_face(fake, 10.0)
+
+
+def test_obstacle_wholly_beyond_goal_is_not_clamped_to_last_csv_pose():
+    from avoidance_planner.geometry import Pose2
+    fake = SimpleNamespace(
+        route=(Pose2(0.0, 0.0, 0.0), Pose2(10.0, 0.0, 0.0)),
+        p={'vehicle_length_m': 1.30, 'minimum_obstacle_depth_m': 0.65,
+           'obstacle_safety_longitudinal_m': 0.15})
+    assert AvoidanceCoordinator._is_beyond_route_goal(
+        fake, SimpleNamespace(x=11.20, y=0.0))
+    assert not AvoidanceCoordinator._is_beyond_route_goal(
+        fake, SimpleNamespace(x=11.00, y=0.0))
 
 
 def test_obstacle_statuses_label_passed_track_and_order_by_x():

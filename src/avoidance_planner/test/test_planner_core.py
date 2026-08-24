@@ -7,10 +7,12 @@ import pytest
 from avoidance_planner.collision_evaluator import (
     ReplanDebounce, collision_response, evaluate_track_collision)
 from avoidance_planner.geometry import (
-    Box2, Pose2, footprint_collision, path_curvatures,
+    Box2, Pose2, footprint_collision, path_curvatures, path_frenet_collision,
     path_min_clearances, steering_angles, vehicle_polygon)
 from avoidance_planner.local_planner import (
-    calculate_corridor, plan_candidates, project_route, quintic_blend)
+    adaptive_corridor_fractions, calculate_corridor, interpolate_route,
+    observed_surface_to_frenet_box, plan_candidates, project_route,
+    quintic_blend, route_lengths, world_box_to_frenet)
 from avoidance_planner.perception import (
     DYNAMIC_OBSTACLE, STATIC_OBSTACLE, TrackManager, ScanPoint,
     adaptive_clusters, adaptive_gap, cluster_groups, preprocess_scan,
@@ -20,6 +22,26 @@ from avoidance_planner.perception import (
 def straight_route(length=15.0, step=0.05):
     return tuple(Pose2(i*step, 0.0, 0.0)
                  for i in range(round(length/step)+1))
+
+
+def curved_route(length=30.0, step=0.10):
+    points = []
+    for index in range(round(length/step)+1):
+        x = index*step
+        y = 0.80*math.sin(2.0*math.pi*x/length)
+        dy = 0.80*(2.0*math.pi/length)*math.cos(2.0*math.pi*x/length)
+        points.append(Pose2(x, y, math.atan2(dy, 1.0)))
+    return tuple(points)
+
+
+def route_aligned_world_box(route, s, d, length=0.65, width=0.39):
+    x, y, yaw = interpolate_route(route, route_lengths(route), s)
+    x -= d*math.sin(yaw)
+    y += d*math.cos(yaw)
+    c, sn = abs(math.cos(yaw)), abs(math.sin(yaw))
+    half_x = 0.5*(length*c+width*sn)
+    half_y = 0.5*(length*sn+width*c)
+    return Box2(x-half_x, x+half_x, y-half_y, y+half_y)
 
 
 def scan_points(count=6, x=3.0, y0=0.55, spacing=0.04):
@@ -194,6 +216,17 @@ def test_obstacle_outside_path_is_ignored():
     assert not risk.required
 
 
+def test_narrow_side_return_keeps_unresolved_centreward_collision_relevance():
+    item = track(y=0.68)
+    item.min_y, item.max_y = 0.64, 0.72
+    risk = evaluate_track_collision(
+        straight_route(10), Pose2(3.5, 0.0, 0.0), item,
+        1.30, 0.78, 0.0, 0.20, 0.15, 8.0, 0.5,
+        1.095, -1.095, 0.65, 0, 0.65, 0.39)
+    assert risk.required
+    assert risk.lidar_surface_distance < 2.0
+
+
 def test_vehicle_footprint_is_rectangle_not_point():
     polygon = vehicle_polygon(Pose2(0, 0, 0), 1.30, 0.78)
     assert polygon[0] == pytest.approx((-0.65, -0.39))
@@ -231,6 +264,70 @@ def test_quintic_connection_has_zero_endpoint_slope():
 def test_route_projection_never_uses_behind_minimum_index():
     projection = project_route(straight_route(), 2.0, 0.2, minimum_index=50)
     assert projection.index >= 50
+
+
+def test_curved_route_projection_reports_signed_frenet_lateral_distance():
+    route = curved_route()
+    pose = route[100]
+    x = pose.x-0.40*math.sin(pose.yaw)
+    y = pose.y+0.40*math.cos(pose.yaw)
+    projection = project_route(route, x, y)
+    assert projection.index in (99, 100)
+    assert projection.d == pytest.approx(0.40, abs=2.0e-3)
+
+
+def test_route_aligned_obstacle_recovers_local_edges_on_curve():
+    route = curved_route()
+    local = world_box_to_frenet(route, route_aligned_world_box(route, 10.0, 0.78))
+    assert 0.63 < local.max_x-local.min_x < 0.67
+    assert 0.37 < local.max_y-local.min_y < 0.41
+    assert 0.76 < 0.5*(local.min_y+local.max_y) < 0.80
+
+
+@pytest.mark.parametrize('side', [-0.78, 0.78])
+def test_common_planner_builds_curved_frenet_avoidance_and_rejoin(side):
+    route = curved_route()
+    obstacle_s = 10.0
+    current_x, current_y, current_yaw = interpolate_route(
+        route, route_lengths(route), obstacle_s-2.975)
+    result = plan_candidates(
+        route, Pose2(current_x, current_y, current_yaw),
+        route_aligned_world_box(route, obstacle_s, side), 1.095, -1.095,
+        target_fractions=(0.25, 0.50, 0.75, 0.80, 0.85, 0.90),
+        rejoin_straight_extension=2.0)
+    assert result.selected is not None
+    assert result.selected.max_steering_rad <= math.radians(25.0)
+    assert result.selected.obstacle_clearance >= 0.20
+    assert result.selected.curb_clearance > 0.0
+    assert result.selected.terminal_curvature_error <= 0.04
+    assert project_route(route, result.selected.path[-1].x,
+                         result.selected.path[-1].y).d == pytest.approx(0.0, abs=1.0e-4)
+
+
+def test_curved_boundary_check_uses_route_normal_not_world_y():
+    route = tuple(Pose2(p.x, p.y+2.0, p.yaw) for p in curved_route())
+    assert not path_frenet_collision(
+        route[30:40], route, 1.30, 0.78, 0.0, (), 1.095, -1.095)
+
+
+def test_curved_two_metre_trigger_uses_frenet_obstacle_surface():
+    route = curved_route()
+    obstacle_s = 10.0
+    current_s = obstacle_s-0.325-0.65-2.0
+    x, y, yaw = interpolate_route(route, route_lengths(route), current_s)
+    box = route_aligned_world_box(route, obstacle_s, 0.78)
+    center_x = 0.5*(box.min_x+box.max_x)
+    center_y = 0.5*(box.min_y+box.max_y)
+    fake_track = SimpleNamespace(
+        x=center_x, y=center_y, min_x=box.min_x, max_x=box.max_x,
+        min_y=box.min_y, max_y=box.max_y, state=STATIC_OBSTACLE, track_id=9)
+    risk = evaluate_track_collision(
+        route, Pose2(x, y, yaw), fake_track, 1.30, 0.78, 0.0,
+        0.20, 0.15, 8.0, 0.5, 1.095, -1.095, 0.65, 0, 0.65)
+    assert risk.required
+    # Polyline Frenet projection of a finite-width body on a curve differs
+    # slightly from centreline arc distance; stay within 3 cm of the surface.
+    assert risk.lidar_surface_distance == pytest.approx(2.0, abs=0.03)
 
 
 def nominal_plan():
@@ -292,9 +389,41 @@ def test_curvature_and_steering_use_bicycle_model():
 def test_candidates_over_twenty_five_degrees_are_discarded_not_clamped():
     result = nominal_plan()
     rejected = [item for item in result.candidates
-                if item.reason == 'STEERING_LIMIT_EXCEEDED']
+                if item.reason == 'STEERING_LIMIT']
     assert rejected and all(item.max_steering_rad > math.radians(25) for item in rejected)
-    assert result.selected.max_steering_rad < math.radians(25)
+
+
+def test_path_facing_surface_extends_obstacle_away_from_csv():
+    route = curved_route()
+    x, y, _yaw = interpolate_route(route, route_lengths(route), 18.2)
+    observed = Box2(x-0.325, x+0.325, y-0.60, y-0.52)
+    recovered = observed_surface_to_frenet_box(
+        route, observed, obstacle_length=0.65, obstacle_width=0.39)
+    assert recovered.max_y < 0.0
+    assert recovered.max_y-recovered.min_y == pytest.approx(0.39)
+    assert abs(recovered.min_y) > abs(recovered.max_y)
+
+
+def test_outer_side_surface_extends_toward_csv_when_outward_body_crosses_curb():
+    route = curved_route()
+    x, y, _yaw = interpolate_route(route, route_lengths(route), 18.2)
+    observed = Box2(x-0.325, x+0.325, y+0.78, y+0.86)
+    recovered = observed_surface_to_frenet_box(
+        route, observed, obstacle_length=0.65, obstacle_width=0.39,
+        left_boundary=1.095, right_boundary=-1.095)
+    assert recovered.max_y <= 1.095
+    assert recovered.max_y-recovered.min_y == pytest.approx(0.39)
+    assert recovered.min_y < recovered.max_y-0.30
+
+
+def test_adaptive_targets_cover_both_corridor_edges_without_touching_them():
+    corridor = calculate_corridor(
+        Box2(5.0, 5.65, -0.95, -0.56), 1.095, -1.095,
+        0.78, 0.20, 0.08)
+    values = adaptive_corridor_fractions(corridor, 7)
+    assert len(values) == 7
+    assert 0.0 < values[0] <= 0.20
+    assert 0.80 <= values[-1] < 1.0
 
 
 def test_minimum_turn_radius_and_curvature_bound_match_twenty_five_degrees():

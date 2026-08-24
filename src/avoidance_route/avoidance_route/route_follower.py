@@ -19,14 +19,14 @@ from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, Float32, Int32, String
 from std_srvs.srv import Trigger
-from visualization_msgs.msg import Marker
+from visualization_msgs.msg import Marker, MarkerArray
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from .authority import CommandAuthority, CommandAuthorityError
 from .route_following import (
-    RouteError, Waypoint, avoidance_rejoin_ready, compute_control,
+    RouteError, Waypoint, avoidance_rejoin_ready, compute_control, curvature_at,
     load_route_csv, nearest_projection, normalize_angle, path_remaining,
-    route_length, safety_reason, start_pose_matches)
+    route_length, safety_reason, start_pose_matches, terminal_curvature)
 from .route_io import non_overwriting_path
 
 
@@ -109,6 +109,8 @@ class RouteFollower(Node):
             Marker, '/avoidance/route/remaining_marker', 10)
         self.rejoin_marker_pub = self.create_publisher(
             Marker, '/avoidance/route/rejoin_marker', qos)
+        self.local_frame_pub = self.create_publisher(
+            MarkerArray, '/avoidance/route/local_frenet_frame', 10)
         self.start_service = self.create_service(Trigger, '/avoidance/route/start', self._start)
         self.stop_service = self.create_service(Trigger, '/avoidance/route/stop', self._stop_service)
         self.global_stop_service = self.create_service(
@@ -706,12 +708,19 @@ class RouteFollower(Node):
                 float(self.p['avoidance_rejoin_max_overshoot_m']))
             terminal = remaining_path <= float(
                 self.p['avoidance_rejoin_alignment_distance_m'])
-            steering_ready = abs(result.steering_rad) <= math.radians(
-                float(self.p['avoidance_rejoin_steering_tolerance_deg']))
-        # Past the final polyline point, nearest.distance includes harmless
-        # along-track overshoot.  The terminal tangent's lateral error is the
-        # actual cross-track safety quantity.
-        safety_cross_track = lateral if avoiding and terminal else result.nearest.distance
+            expected_terminal_steering = math.atan(
+                float(self.p['wheelbase_m'])*terminal_curvature(active_points))
+            steering_ready = abs(normalize_angle(
+                result.steering_rad-expected_terminal_steering)) <= math.radians(
+                    float(self.p['avoidance_rejoin_steering_tolerance_deg']))
+        # Only after passing the final point does nearest.distance include
+        # harmless along-track overshoot.  On a curved route, points in the
+        # terminal alignment zone can legitimately be far from the *final*
+        # tangent even while they are exactly on the selected path.
+        terminal_overshoot = ((x-goal.x)*math.cos(goal.yaw) +
+                              (y-goal.y)*math.sin(goal.yaw))
+        safety_cross_track = (lateral if avoiding and terminal_overshoot > 0.0
+                              else result.nearest.distance)
         reason = safety_reason(
             odom_age, float(self.p['odom_timeout_s']), safety_cross_track,
             float(self.p['avoidance_max_cross_track_error_m'] if avoiding else
@@ -742,6 +751,7 @@ class RouteFollower(Node):
                     f'lateral={lateral:.3f} m, '
                     f'yaw_error={math.degrees(yaw_error):.3f} deg, '
                     f'steering={math.degrees(result.steering_rad):.3f} deg, '
+                    f'expected_steering={math.degrees(expected_terminal_steering):.3f} deg, '
                     f'index={self.rejoin_index}')
                 return
             if terminal and self.state != 'REJOIN_ALIGNING':
@@ -902,7 +912,44 @@ class RouteFollower(Node):
         marker.color.r, marker.color.g, marker.color.b = 0.1, 0.8, 1.0
         marker.points = [Point(x=x, y=y), Point(x=result.target_x, y=result.target_y)]
         self.segment_marker_pub.publish(marker)
+        self._publish_local_frame(result, x, y)
         self._publish_progress_markers()
+
+    def _publish_local_frame(self, result, x, y):
+        active = (self.selected_points if self.state in
+                  ('FOLLOWING_AVOIDANCE', 'REJOIN_ALIGNING') else self.points)
+        index = max(0, min(result.nearest_index, len(active)-1))
+        yaw = active[index].yaw
+        markers = MarkerArray()
+        for marker_id, (name, dx, dy, color) in enumerate((
+                ('csv_tangent', 0.8*math.cos(yaw), 0.8*math.sin(yaw), (0.0, 1.0, 0.0)),
+                ('csv_normal', -0.6*math.sin(yaw), 0.6*math.cos(yaw), (0.0, 0.5, 1.0)))):
+            marker = self._base_marker(name, marker_id, Marker.ARROW)
+            marker.scale.x, marker.scale.y, marker.scale.z = 0.04, 0.08, 0.10
+            marker.color.r, marker.color.g, marker.color.b = color
+            marker.points = [Point(x=result.nearest.x, y=result.nearest.y, z=0.10),
+                             Point(x=result.nearest.x+dx, y=result.nearest.y+dy, z=0.10)]
+            markers.markers.append(marker)
+        text = self._base_marker('local_frenet_status', 2, Marker.TEXT_VIEW_FACING)
+        text.pose.position.x, text.pose.position.y, text.pose.position.z = x, y, 1.55
+        text.scale.z = 0.16
+        text.color.r = text.color.g = text.color.b = 1.0
+        text.text = (f's={index} source={self.control_source} state={self.state}\n'
+                     f'CTE={result.nearest.distance:.3f}m '
+                     f'heading_err={math.degrees(abs(normalize_angle(self._pose()[2]-yaw))):.2f}deg\n'
+                     f'steer={math.degrees(self.steering):.2f}deg '
+                     f'kappa={curvature_at(active, index):.4f} 1/m')
+        markers.markers.append(text)
+        footprint = self._base_marker('vehicle_footprint', 3, Marker.CUBE)
+        footprint.pose.position.x, footprint.pose.position.y = x, y
+        footprint.pose.position.z = 0.03
+        vehicle_yaw = self._pose()[2]
+        footprint.pose.orientation.z = math.sin(vehicle_yaw/2.0)
+        footprint.pose.orientation.w = math.cos(vehicle_yaw/2.0)
+        footprint.scale.x, footprint.scale.y, footprint.scale.z = 1.30, 0.78, 0.06
+        footprint.color.g, footprint.color.b, footprint.color.a = 0.9, 0.8, 0.25
+        markers.markers.append(footprint)
+        self.local_frame_pub.publish(markers)
 
     def _publish_progress_markers(self):
         """Traveled (grey, 0..segment) vs remaining (blue, segment..end) of
@@ -931,6 +978,7 @@ class RouteFollower(Node):
                    'csv_index': self.segment,
                    'rejoin_index': self.rejoin_index,
                    'max_steering_deg': float(self.p['max_steering_deg']),
+                   'max_observed_steering_deg': max(self.steering_samples, default=0.0),
                    'csv_rejoin_recovery': self.csv_rejoin_recovery,
                    'avoidance_max_steering_deg': max(
                        self.avoidance_steering_samples, default=0.0),
@@ -946,6 +994,13 @@ class RouteFollower(Node):
                             'steering_deg': math.degrees(self.steering),
                             'speed_mps': self.speed,
                             'goal_distance_m': goal_distance})
+            active = (self.selected_points if self.state in
+                      ('FOLLOWING_AVOIDANCE', 'REJOIN_ALIGNING') else self.points)
+            local_index = max(0, min(result.nearest_index, len(active)-1))
+            payload.update({
+                'heading_error_deg': math.degrees(abs(normalize_angle(
+                    self._yaw(self.odom.pose.pose.orientation)-active[local_index].yaw))),
+                'local_curvature': curvature_at(active, local_index)})
             if self.state in ('FOLLOWING_AVOIDANCE', 'REJOIN_ALIGNING'):
                 self.avoidance_cte_samples.append(result.nearest.distance)
                 self.avoidance_steering_samples.append(abs(math.degrees(self.steering)))
