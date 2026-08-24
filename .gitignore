@@ -11,6 +11,8 @@ routes/*.yaml
 !routes/straight_reference.yaml
 !routes/s_curve_reference.csv
 !routes/s_curve_reference.yaml
+!routes/facility_s_curve_reference.csv
+!routes/facility_s_curve_reference.yaml
 runtime_logs/
 verification_logs/
 .vscode/

@@ -34,6 +34,20 @@ def curved_route(length=30.0, step=0.10):
     return tuple(points)
 
 
+def test_route_interpolation_uses_csv_tangents_without_waypoint_corners():
+    radius = 4.0
+    route = tuple(
+        Pose2(radius*math.sin(angle), radius*(1.0-math.cos(angle)), angle)
+        for angle in (0.0, 0.04, 0.08, 0.12, 0.16))
+    lengths = route_lengths(route)
+    samples = tuple(
+        Pose2(*interpolate_route(route, lengths, index*lengths[-1]/80.0))
+        for index in range(81))
+    maximum = max(abs(value) for value in path_curvatures(samples))
+    assert maximum == pytest.approx(1.0/radius, abs=0.01)
+    assert math.degrees(math.atan(0.77*maximum)) < 25.0
+
+
 def route_aligned_world_box(route, s, d, length=0.65, width=0.39):
     x, y, yaw = interpolate_route(route, route_lengths(route), s)
     x -= d*math.sin(yaw)
@@ -53,6 +67,17 @@ def track(x=6.0, y=0.78, state=STATIC_OBSTACLE):
     return SimpleNamespace(
         x=x, y=y, min_x=x-0.025, max_x=x+0.025,
         min_y=y-0.195, max_y=y+0.195, state=state, track_id=1)
+
+
+def test_track_epoch_reset_discards_associations_without_reusing_ids():
+    manager = TrackManager(confirmation_frames=1, static_frames=1)
+    detection = SimpleNamespace(
+        x=3.0, y=0.7, min_x=2.9, max_x=3.1, min_y=0.6, max_y=0.8)
+    first = manager.update((detection,), 1.0)
+    assert [item.track_id for item in first] == [1]
+    manager.reset_epoch()
+    second = manager.update((detection,), 2.0)
+    assert [item.track_id for item in second] == [2]
 
 
 def test_nan_inf_and_out_of_range_removed():

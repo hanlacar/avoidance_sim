@@ -32,6 +32,7 @@ class Detection:
     width: float
     depth: float
     kind: str = UNCONFIRMED
+    points: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -120,7 +121,8 @@ def adaptive_clusters(points, min_points, min_width, near_gap, far_gap,
             continue
         detections.append(Detection(
             sum(xs)/len(xs), sum(ys)/len(ys), min(xs), max(xs),
-            min(ys), max(ys), len(group), width, max(xs)-min(xs)))
+            min(ys), max(ys), len(group), width, max(xs)-min(xs),
+            points=tuple(group)))
     return detections
 
 
@@ -196,7 +198,8 @@ def split_walls_and_objects(point_groups, route_heading, min_wall_length,
         detection = Detection(
             sum(xs)/len(xs), sum(ys)/len(ys), min(xs), max(xs), min(ys),
             max(ys), len(points), width, max(xs)-min(xs),
-            UNCONFIRMED if width >= min_cluster_width else UNKNOWN)
+            UNCONFIRMED if width >= min_cluster_width else UNKNOWN,
+            tuple(points))
         (objects if detection.kind == UNCONFIRMED else unknown).append(detection)
     return walls, objects, unknown
 
@@ -239,6 +242,10 @@ class TrackManager:
         self.dynamic_min_observations = dynamic_min_observations
         self.tracks = {}
         self.next_id = 1
+
+    def reset_epoch(self):
+        """Discard associations while preserving globally unique track IDs."""
+        self.tracks.clear()
 
     def update(self, detections, stamp):
         unmatched_tracks = set(self.tracks)

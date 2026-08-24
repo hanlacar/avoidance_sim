@@ -27,6 +27,13 @@ avoidance_coordinator:
     dynamic_confirmation_frames: 3
     dynamic_min_observations: 3
     static_confirmation_frames: 5
+    fixed_environment_mode: false
+    fixed_obstacle_s_m: [0.0]
+    fixed_obstacle_d_m: [0.0]
+    fixed_obstacle_match_s_m: 1.50
+    fixed_obstacle_match_d_m: 0.70
+    fixed_obstacle_length_m: 1.30
+    fixed_obstacle_width_m: 0.78
     wall_min_length_m: 1.50
     wall_max_residual_m: 0.05
     wall_parallel_tolerance_deg: 15.0

@@ -33,8 +33,8 @@ from .geometry import Pose2
 from .local_planner import (interpolate_route, plan_candidates, project_route,
                             route_lengths)
 from .perception import (
-    DYNAMIC_OBSTACLE, STATIC_OBSTACLE, LineFeature, TrackManager, ScanPoint,
-    cluster_groups, split_walls_and_objects, preprocess_scan)
+    DYNAMIC_OBSTACLE, STATIC_OBSTACLE, Detection, LineFeature, TrackManager,
+    ScanPoint, cluster_groups, split_walls_and_objects, preprocess_scan)
 
 
 PLANNER_STATES = (
@@ -68,6 +68,12 @@ class AvoidanceCoordinator(Node):
             'dynamic_confirmation_frames': 3,
             'dynamic_min_observations': 3,
             'static_confirmation_frames': 5,
+            'fixed_environment_mode': False,
+            'fixed_obstacle_s_m': [0.0], 'fixed_obstacle_d_m': [0.0],
+            'fixed_obstacle_match_s_m': 1.50,
+            'fixed_obstacle_match_d_m': 0.70,
+            'fixed_obstacle_length_m': 1.30,
+            'fixed_obstacle_width_m': 0.78,
             'wall_min_length_m': 1.50, 'wall_max_residual_m': 0.05,
             'wall_parallel_tolerance_deg': 15.0,
             'vehicle_length_m': 1.30, 'vehicle_width_m': 0.78,
@@ -184,6 +190,7 @@ class AvoidanceCoordinator(Node):
         self.route = ()
         self.route_nearest_index = 0
         self.tracks = ()
+        self.fixed_matched_track_ids = set()
         self.walls = ()
         self.boundary_source = 'configured_fallback'
         self.wall_hits = 0
@@ -219,6 +226,7 @@ class AvoidanceCoordinator(Node):
             'effective_scan_hz': 0.0}
         self.last_plan_summary = {}
         self.last_track_decisions = []
+        self.cluster_diagnostics = []
         self.track_decision_states = {}
         self.last_scan_wall = None
         self.last_scan_stamp = None
@@ -320,6 +328,17 @@ class AvoidanceCoordinator(Node):
                                   track.y-self.selected_track.y) <= 1.0:
                         self.passed_track_ids.add(track.track_id)
             self.debounce = ReplanDebounce(int(self.p['confirmation_frames']))
+            # Associations accumulated while the vehicle follows a large
+            # avoidance arc mix different visible faces of segmented curbs.
+            # They are not valid motion evidence after CSV rejoin.  Start a
+            # fresh perception epoch so the next physical obstacle must be
+            # confirmed from current stationary-world observations.
+            self.tracker.reset_epoch()
+            self.tracks = ()
+            self.walls = ()
+            self.unknown = ()
+            self.wall_hits = 0
+            self.last_track_decisions = []
             self.selected_track = None
             self.future = None
             self.avoidance_started = False
@@ -472,12 +491,67 @@ class AvoidanceCoordinator(Node):
             float(self.p['min_cluster_width_m']))
         walls = tuple(curved_walls)+tuple(walls)
         walls, detections = self._classify_curved_boundaries(walls, detections)
+        if self.p['fixed_environment_mode']:
+            lengths = route_lengths(self.route)
+            mapped = []
+            box_length = float(self.p['fixed_obstacle_length_m'])
+            box_width = float(self.p['fixed_obstacle_width_m'])
+            for fixed_s, fixed_d in zip(
+                    self.p['fixed_obstacle_s_m'],
+                    self.p['fixed_obstacle_d_m']):
+                x, y, yaw = interpolate_route(self.route, lengths, fixed_s)
+                x -= fixed_d*math.sin(yaw)
+                y += fixed_d*math.cos(yaw)
+                half_x = 0.5*(box_length*abs(math.cos(yaw))+
+                              box_width*abs(math.sin(yaw)))
+                half_y = 0.5*(box_length*abs(math.sin(yaw))+
+                              box_width*abs(math.cos(yaw)))
+                mapped.append(Detection(
+                    x, y, x-half_x, x+half_x, y-half_y, y+half_y,
+                    100, box_width, box_length))
+            # The fixed SDF is the obstacle source of truth.  LiDAR returns
+            # above still establish exact TF readiness and observe boundaries,
+            # while transient visible-face clusters cannot replace a box.
+            detections = tuple(mapped)
         self.performance['wall_detection_ms'] = (time.perf_counter()-wall_started)*1000.0
         self.wall_hits = self.wall_hits+1 if walls else 0
         self.walls = tuple(walls) if self.wall_hits >= int(self.p['confirmation_frames']) else ()
         self.unknown = tuple(unknown)
         track_started = time.perf_counter()
-        self.tracks = self.tracker.update(detections, stamp_seconds)
+        updated_tracks = self.tracker.update(detections, stamp_seconds)
+        # In a world whose collision geometry is contractually all static, a
+        # DYNAMIC result can only be apparent motion: for example, association
+        # walking along consecutive tessellated curb faces as the ego vehicle
+        # rounds a bend.  Do not promote that surface alias into a collision
+        # track.  The default remains unchanged for worlds with moving actors.
+        if self.p['fixed_environment_mode']:
+            fixed_tracks = []
+            expected = tuple(zip(
+                self.p['fixed_obstacle_s_m'], self.p['fixed_obstacle_d_m']))
+            for track in updated_tracks:
+                if track.state == DYNAMIC_OBSTACLE:
+                    projection = project_route(
+                        self.route, track.x, track.y, 0)
+                    matched = any(
+                        abs(projection.s-fs) <=
+                        float(self.p['fixed_obstacle_match_s_m']) and
+                        abs(projection.d-fd) <=
+                        float(self.p['fixed_obstacle_match_d_m'])
+                        for fs, fd in expected)
+                    if matched:
+                        self.fixed_matched_track_ids.add(track.track_id)
+                    if (not matched and
+                            track.track_id not in self.fixed_matched_track_ids):
+                        continue
+                    # The map contract proves this actor is fixed; the
+                    # measured velocity is only visible-face association.
+                    track.state = STATIC_OBSTACLE
+                    track.vx = track.vy = track.speed = 0.0
+                    track.dynamic_count = 0
+                fixed_tracks.append(track)
+            self.tracks = tuple(fixed_tracks)
+        else:
+            self.tracks = updated_tracks
         self.performance['track_update_ms'] = (time.perf_counter()-track_started)*1000.0
         self.performance['scan_processing_ms'] = (time.perf_counter()-started)*1000.0
         self.scan_count += 1
@@ -489,11 +563,51 @@ class AvoidanceCoordinator(Node):
             return tuple(walls), tuple(detections)
         kept = []
         curved_walls = list(walls)
+        diagnostics = []
         lengths = route_lengths(self.route)
         for detection in detections:
             projection = project_route(
                 self.route, detection.x, detection.y, self.route_nearest_index)
-            if detection.width >= 1.50:
+            raw_points = detection.points
+            if len(raw_points) > 9:
+                last = len(raw_points)-1
+                raw_points = tuple(
+                    raw_points[round(sample*last/8)] for sample in range(9))
+            raw_projections = [
+                # A tight facility bend can leave a rearward curb visible in
+                # the front ROI after rejoin.  Forcing that static map point
+                # onto a future-only segment moves its Frenet d into the lane.
+                # Boundary classification is map-global; collision risk below
+                # remains progressive from route_nearest_index.
+                project_route(self.route, point.x, point.y, 0)
+                for point in raw_points]
+            curb_band = 0.16
+            left_limit = float(self.p['left_curb_inner_y_m'])-curb_band
+            right_limit = float(self.p['right_curb_inner_y_m'])+curb_band
+            curb_points = sum(
+                item.d >= left_limit or item.d <= right_limit
+                for item in raw_projections)
+            raw_curb = (not self.p['fixed_environment_mode'] and
+                        detection.width < 0.65 and raw_projections and
+                        curb_points >= math.ceil(0.80*len(raw_projections)))
+            diagnostics.append({
+                'center_x': detection.x, 'center_y': detection.y,
+                'center_s': projection.s, 'center_d': projection.d,
+                'width_m': detection.width,
+                'raw_d_min': min((item.d for item in raw_projections),
+                                 default=None),
+                'raw_d_max': max((item.d for item in raw_projections),
+                                 default=None),
+                'raw_curb_fraction': (curb_points/len(raw_projections)
+                                      if raw_projections else 0.0),
+                'classified_as_curb': bool(
+                    detection.width >= 1.50 or raw_curb),
+            })
+            if detection.width >= 1.50 or raw_curb:
+                if raw_curb:
+                    projection = sorted(
+                        raw_projections, key=lambda item: item.d)[
+                            len(raw_projections)//2]
                 x, y, yaw = interpolate_route(self.route, lengths, projection.s)
                 x -= projection.d*math.sin(yaw)
                 y += projection.d*math.cos(yaw)
@@ -504,6 +618,7 @@ class AvoidanceCoordinator(Node):
                     yaw, detection.width, 0.0))
             else:
                 kept.append(detection)
+        self.cluster_diagnostics = diagnostics[-12:]
         return tuple(curved_walls), tuple(kept)
 
     def _current_pose(self):
@@ -1157,6 +1272,7 @@ class AvoidanceCoordinator(Node):
             'selected_path_driving_enabled': True,
             'last_plan_summary': self.last_plan_summary,
             'last_track_decisions': self.last_track_decisions,
+            'cluster_diagnostics': self.cluster_diagnostics,
         }
         text = json.dumps(payload, sort_keys=True)
         self.status_pub.publish(String(data=text))

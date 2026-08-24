@@ -102,8 +102,12 @@ def test_routes_directory_has_separate_straight_and_s_references():
     routes = ROOT.parents[1] / 'routes'
     csv_files = sorted(p.name for p in routes.glob('*.csv'))
     yaml_files = sorted(p.name for p in routes.glob('*.yaml'))
-    assert csv_files == ['s_curve_reference.csv', 'straight_reference.csv']
-    assert yaml_files == ['s_curve_reference.yaml', 'straight_reference.yaml']
+    assert csv_files == [
+        'facility_s_curve_reference.csv', 's_curve_reference.csv',
+        'straight_reference.csv']
+    assert yaml_files == [
+        'facility_s_curve_reference.yaml', 's_curve_reference.yaml',
+        'straight_reference.yaml']
 
 
 def test_fixed_obstacle_seed_is_reproducible():

@@ -30,6 +30,14 @@ def test_planner_has_no_cmd_vel_publisher_contract():
     assert "create_publisher(Twist" not in source
 
 
+def test_fixed_environment_filters_apparent_dynamic_surface_tracks():
+    source = __import__('inspect').getsource(AvoidanceCoordinator._process_scan)
+    assert "if self.p['fixed_environment_mode']" in source
+    assert 'if track.state == DYNAMIC_OBSTACLE' in source
+    assert 'self.fixed_matched_track_ids.add(track.track_id)' in source
+    assert 'track.state = STATIC_OBSTACLE' in source
+
+
 def test_dynamic_to_static_transition_cannot_return_to_latched_csv_deadlock():
     source = __import__('inspect').getsource(AvoidanceCoordinator._tick)
     stationary_block = source.split(
@@ -92,16 +100,60 @@ def test_completed_track_is_marked_passed_and_excluded_from_status():
     fake = SimpleNamespace(
         selected_track=SimpleNamespace(track_id=7), avoidance_started=True,
         debounce=SimpleNamespace(), replan_pub=Mock(),
+        tracker=SimpleNamespace(reset_epoch=Mock()),
+        tracks=(), walls=(), unknown=(), wall_hits=0,
+        last_track_decisions=[],
         p={'confirmation_frames': 3},
         passed_track_ids=set(), _set_state=Mock())
     AvoidanceCoordinator._control_source(fake, SimpleNamespace(data='GPS'))
     assert fake.passed_track_ids == {7}
+    fake.tracker.reset_epoch.assert_called_once_with()
 
 
 def test_new_lidar_face_of_passed_physical_obstacle_is_suppressed():
     fake = SimpleNamespace(passed_obstacle_s=[8.0])
     assert AvoidanceCoordinator._is_passed_obstacle_face(fake, 8.9)
     assert not AvoidanceCoordinator._is_passed_obstacle_face(fake, 10.0)
+
+
+def test_raw_route_boundary_points_are_not_tracked_by_chord_centroid():
+    from avoidance_planner.geometry import Pose2
+    from avoidance_planner.perception import Detection, ScanPoint
+    route = tuple(Pose2(index*0.1, 0.0, 0.0) for index in range(101))
+    points = tuple(ScanPoint(index, 3.0+index*0.01, 1.50, 3.0)
+                   for index in range(80))
+    # A curved chord centroid can project well inside the road even though
+    # every source return lies on the known curb band.
+    detection = Detection(3.2, 0.55, 3.0, 3.4, 0.5, 1.5,
+                          len(points), 0.40, 0.40, points=points)
+    fake = SimpleNamespace(
+        route=route, route_nearest_index=0,
+        p={'left_curb_inner_y_m': 1.50,
+           'right_curb_inner_y_m': -1.50,
+           'fixed_environment_mode': False})
+    walls, kept = AvoidanceCoordinator._classify_curved_boundaries(
+        fake, (), (detection,))
+    assert len(walls) == 1
+    assert kept == ()
+
+
+def test_wide_obstacle_face_is_not_absorbed_into_raw_curb_band():
+    from avoidance_planner.geometry import Pose2
+    from avoidance_planner.perception import Detection, ScanPoint
+    route = tuple(Pose2(index*0.1, 0.0, 0.0) for index in range(101))
+    points = tuple(ScanPoint(index, 3.0+index*0.01, -1.50, 3.0)
+                   for index in range(80))
+    detection = Detection(3.4, -1.50, 3.0, 3.8, -1.55, -1.45,
+                          len(points), 0.78, 0.10, points=points)
+    fake = SimpleNamespace(
+        route=route, route_nearest_index=0,
+        p={'left_curb_inner_y_m': 1.50,
+           'right_curb_inner_y_m': -1.50,
+           'fixed_environment_mode': False})
+    walls, kept = AvoidanceCoordinator._classify_curved_boundaries(
+        fake, (), (detection,))
+    assert walls == ()
+    assert kept == (detection,)
 
 
 def test_obstacle_wholly_beyond_goal_is_not_clamped_to_last_csv_pose():

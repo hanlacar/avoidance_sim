@@ -101,9 +101,27 @@ def interpolate_route(route, lengths, s):
     first, second = route[index], route[index+1]
     span = max(1.0e-12, lengths[index+1]-lengths[index])
     ratio = (s-lengths[index])/span
-    x = first.x+ratio*(second.x-first.x)
-    y = first.y+ratio*(second.y-first.y)
-    yaw = math.atan2(second.y-first.y, second.x-first.x)
+    # CSV yaw is the measured / generated route tangent.  A linear position
+    # interpolation discards it and turns every coarse waypoint into an
+    # instantaneous heading corner.  Cubic Hermite interpolation preserves
+    # both endpoint positions and tangents, so Frenet curvature represents
+    # the intended road instead of the CSV sampling interval.
+    t2, t3 = ratio*ratio, ratio*ratio*ratio
+    h00 = 2.0*t3-3.0*t2+1.0
+    h10 = t3-2.0*t2+ratio
+    h01 = -2.0*t3+3.0*t2
+    h11 = t3-t2
+    m0x, m0y = span*math.cos(first.yaw), span*math.sin(first.yaw)
+    m1x, m1y = span*math.cos(second.yaw), span*math.sin(second.yaw)
+    x = h00*first.x+h10*m0x+h01*second.x+h11*m1x
+    y = h00*first.y+h10*m0y+h01*second.y+h11*m1y
+    dh00 = 6.0*t2-6.0*ratio
+    dh10 = 3.0*t2-4.0*ratio+1.0
+    dh01 = -dh00
+    dh11 = 3.0*t2-2.0*ratio
+    dx = dh00*first.x+dh10*m0x+dh01*second.x+dh11*m1x
+    dy = dh00*first.y+dh10*m0y+dh01*second.y+dh11*m1y
+    yaw = math.atan2(dy, dx)
     return x, y, yaw
 
 
