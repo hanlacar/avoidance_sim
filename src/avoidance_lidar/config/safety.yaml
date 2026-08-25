@@ -8,12 +8,27 @@ lidar_safety:
     stop_distance_m: 0.50
     resume_distance_m: 0.60
     emergency_stop_distance_m: 0.30
-    front_sector_deg: 30.0
+    front_sector_deg: 90.0
     min_valid_range_m: 0.05
+    corridor_width_m: 1.20
+    wheelbase_m: 0.77
+    roi_min_length_m: 1.50
+    roi_max_length_m: 5.00
+    roi_time_horizon_sec: 1.50
+    reaction_time_sec: 0.30
+    max_deceleration_mps2: 1.00
+    ttc_enabled: true
+    ttc_stop_sec: 1.50
+    ttc_confirm_scans: 2
+    closing_speed_alpha: 0.50
+    max_closing_speed_mps: 10.0
     stop_confirm_scans: 2
     clear_confirm_scans: 3
     scan_timeout_sec: 0.50
     command_timeout_sec: 0.30
     stop_on_scan_timeout: true
     steering_limit_deg: 27
+    odom_topic: /odom
+    odom_timeout_sec: 0.50
+    steering_sign: -1.0
     publish_rate_hz: 20.0

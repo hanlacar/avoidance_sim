@@ -8,7 +8,7 @@ ROS 2 Jazzy에서 실제 RPLIDAR의 `/scan_front`를 받아 장애물을 검출�
 
 ```text
 RPLIDAR → /scan_front → avoidance_lidar
-                         ├─ lidar_safety → 즉시 정지/명령 watchdog
+                         ├─ lidar_safety → 곡선 ROI/TTC/즉시 정지/watchdog
                          └─ avoidance_planner → Frenet 우회 경로
 
 /avoidance/route/reference_path → route_follower
@@ -128,7 +128,7 @@ ros2 launch avoidance_lidar avoidance_vehicle.launch.py \
 
 - `avoidance_lidar/config/rplidar.yaml`: serial port, baudrate, frame, scan mode
 - `avoidance_lidar/config/front_lidar.yaml`: 전방 ROI, scan 범위, clustering
-- `avoidance_lidar/config/safety.yaml`: 정지·복귀 거리, scan/command timeout, 조향 한계
+- `avoidance_lidar/config/safety.yaml`: 조향 경로형 ROI, 속도별 제동거리, TTC, scan/command timeout, 조향 한계
 - `avoidance_planner/config/avoidance_planner.yaml`: 차량 폭·길이·wheelbase, clearance, 재계획 거리, Frenet 후보
 - `avoidance_route/config/route_follower.yaml`: lookahead, 속도, 재합류, drive level
 
@@ -153,7 +153,7 @@ ros2 launch avoidance_lidar avoidance_vehicle.launch.py \
 3. LiDAR만 실행해 `/scan_front` 타입·주기·frame과 TF를 확인한다.
 4. 우회 core를 실행하고 `/lidar_drive`, `/lidar_wheel` publisher가 각각 `lidar_safety` 하나인지 확인한다.
 5. 참조 경로와 `/odom`을 공급한다.
-6. 장애물을 정지 거리 안팎으로 이동해 hysteresis와 scan timeout 정지를 확인한다.
+6. 장애물을 정지 거리 안팎으로 이동해 hysteresis, TTC, scan timeout 정지를 확인한다.
 7. 저속·넓은 폐쇄 구역에서 경로 추종, 우회, 재합류를 순서대로 확인한다.
 8. 이상 시 즉시 다음 서비스를 호출한다.
 
@@ -177,6 +177,8 @@ ros2 service call /avoidance/stop std_srvs/srv/Trigger '{}'
 - 차량 전체 footprint 충돌 검사와 curvature/조향 검증
 - STOP → PLAN → AVOID → REJOIN 흐름
 - CSV 또는 외부 `nav_msgs/msg/Path` 참조 경로
+- 조향 경로형 ROI와 속도 기반 ROI·제동거리
+- 상대 접근 추세 기반 TTC 정지와 STOP/SLOW/CAUTION 진단
 - scan/command watchdog, invalid scan fail-safe, 조향 포화
 
 ## 16. 제외 범위

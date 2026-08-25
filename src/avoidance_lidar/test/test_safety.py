@@ -36,10 +36,66 @@ def test_confirmed_obstacle_stops_and_clear_has_hysteresis():
 def test_invalid_scan_and_timeout_fail_safe():
     gate = LidarSafetyGate(scan_timeout_sec=0.5)
     gate.update_scan(Scan())
+    assert gate.state == gate.CLEAR and not gate.should_stop
+    invalid = Scan()
+    invalid.ranges = [math.nan] * len(invalid.ranges)
+    gate.update_scan(invalid)
     assert gate.state == gate.INVALID_SCAN and gate.should_stop
     gate.update_scan(Scan().set_range(0.0, 1.0))
     gate.update_timeout(0.51)
     assert gate.state == gate.LIDAR_TIMEOUT and gate.should_stop
+
+
+def test_speed_increases_roi_and_physical_stopping_distance():
+    gate = LidarSafetyGate()
+    gate.update_scan(Scan(), ego_speed_mps=2.0)
+    assert gate.effective_roi_length_m == 3.0
+    assert gate.effective_stop_distance_m == 2.6
+
+
+def test_corridor_ignores_side_returns_but_follows_steering_arc():
+    gate = LidarSafetyGate(corridor_width_m=0.20, wheelbase_m=0.77,
+                           stop_confirm_scans=1)
+    steering = 27.0
+    curvature = math.tan(math.radians(steering)) / 0.77
+    progress = 1.0
+    x = math.sin(curvature * progress) / curvature
+    y = (1.0 - math.cos(curvature * progress)) / curvature
+    scan = Scan().set_range(
+        math.degrees(math.atan2(y, x)), math.hypot(x, y))
+    gate.update_scan(scan, steering_deg=0.0)
+    assert gate.state == gate.CLEAR
+    gate.update_scan(scan, steering_deg=steering)
+    assert gate.front_min_distance < 1.05
+
+
+def test_ttc_requires_confirmed_closing_trend():
+    gate = LidarSafetyGate(stop_confirm_scans=5, ttc_stop_sec=1.5,
+                           ttc_confirm_scans=2, roi_min_length_m=3.0)
+    gate.update_scan(Scan().set_range(0.0, 2.0), timestamp=1.0)
+    gate.update_scan(Scan().set_range(0.0, 1.8), timestamp=1.1)
+    assert gate.state == gate.CLEAR
+    gate.update_scan(Scan().set_range(0.0, 1.6), timestamp=1.2)
+    assert gate.state == gate.CLEAR
+    gate.update_scan(Scan().set_range(0.0, 1.4), timestamp=1.3)
+    assert gate.state == gate.OBSTACLE_STOP
+
+
+def test_risk_zones_are_diagnostic_only():
+    gate = LidarSafetyGate(stop_confirm_scans=2)
+    gate.update_scan(Scan().set_range(0.0, 1.3))
+    assert gate.risk_level == 'CAUTION'
+    gate.update_scan(Scan().set_range(0.0, 0.8))
+    assert gate.risk_level == 'SLOW'
+    gate.update_scan(Scan().set_range(0.0, 0.4))
+    assert gate.risk_level == 'STOP'
+
+
+def test_positive_infinity_is_a_valid_laserscan_no_return():
+    gate = LidarSafetyGate()
+    gate.update_scan(Scan())
+    assert gate.state == gate.CLEAR
+    assert math.isinf(gate.front_min_distance)
 
 
 def test_emergency_distance_stops_on_first_scan():

@@ -5,6 +5,7 @@ import math
 import signal
 
 import rclpy
+from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
@@ -24,28 +25,44 @@ class LidarSafetyNode(Node):
             'drive_topic': '/lidar_drive', 'wheel_topic': '/lidar_wheel',
             'stop_distance_m': 0.50, 'resume_distance_m': 0.60,
             'emergency_stop_distance_m': 0.30,
-            'front_sector_deg': 30.0, 'min_valid_range_m': 0.05,
+            'front_sector_deg': 90.0, 'min_valid_range_m': 0.05,
+            'corridor_width_m': 1.20, 'wheelbase_m': 0.77,
+            'roi_min_length_m': 1.50, 'roi_max_length_m': 5.0,
+            'roi_time_horizon_sec': 1.50,
+            'reaction_time_sec': 0.30, 'max_deceleration_mps2': 1.0,
+            'ttc_enabled': True, 'ttc_stop_sec': 1.50,
+            'ttc_confirm_scans': 2, 'closing_speed_alpha': 0.50,
+            'max_closing_speed_mps': 10.0,
             'stop_confirm_scans': 2, 'clear_confirm_scans': 3,
             'scan_timeout_sec': 0.50, 'command_timeout_sec': 0.30,
             'stop_on_scan_timeout': True, 'steering_limit_deg': 27,
-            'publish_rate_hz': 20.0,
+            'publish_rate_hz': 20.0, 'odom_topic': '/odom',
+            'odom_timeout_sec': 0.50, 'steering_sign': -1.0,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
         self.p = {name: self.get_parameter(name).value for name in defaults}
         if not 0 < int(self.p['steering_limit_deg']) <= 27:
             raise ValueError('steering_limit_deg must be in [1, 27]')
-        self.gate = LidarSafetyGate(
-            self.p['stop_distance_m'], self.p['resume_distance_m'],
-            self.p['front_sector_deg'], self.p['min_valid_range_m'],
-            self.p['stop_confirm_scans'], self.p['clear_confirm_scans'],
-            self.p['scan_timeout_sec'], self.p['stop_on_scan_timeout'],
-            self.p['emergency_stop_distance_m'])
+        self.gate = LidarSafetyGate(**{
+            name: self.p[name] for name in (
+                'stop_distance_m', 'resume_distance_m',
+                'front_sector_deg', 'min_valid_range_m',
+                'stop_confirm_scans', 'clear_confirm_scans',
+                'scan_timeout_sec', 'stop_on_scan_timeout',
+                'emergency_stop_distance_m', 'corridor_width_m',
+                'wheelbase_m', 'roi_min_length_m', 'roi_max_length_m',
+                'roi_time_horizon_sec', 'reaction_time_sec',
+                'max_deceleration_mps2', 'ttc_enabled', 'ttc_stop_sec',
+                'ttc_confirm_scans', 'closing_speed_alpha',
+                'max_closing_speed_mps')})
         self.requested_drive = 0.0
         self.requested_wheel = 0
         self.last_scan_time = None
         self.last_drive_time = None
         self.last_wheel_time = None
+        self.last_odom_time = None
+        self.ego_speed_mps = 0.0
         self.drive_pub = self.create_publisher(
             Float32, str(self.p['drive_topic']), 10)
         self.wheel_pub = self.create_publisher(
@@ -61,6 +78,8 @@ class LidarSafetyNode(Node):
             Float32, str(self.p['requested_drive_topic']), self._drive, 10)
         self.create_subscription(
             Int32, str(self.p['requested_wheel_topic']), self._wheel, 10)
+        self.create_subscription(
+            Odometry, str(self.p['odom_topic']), self._odom, 10)
         self.create_timer(
             1.0 / max(1.0, float(self.p['publish_rate_hz'])), self._tick)
         self.get_logger().info(
@@ -69,7 +88,15 @@ class LidarSafetyNode(Node):
 
     def _scan(self, msg):
         self.last_scan_time = self.get_clock().now()
-        previous, current = self.gate.update_scan(msg)
+        speed = self.ego_speed_mps
+        if (self.last_odom_time is None or
+                (self.last_scan_time - self.last_odom_time).nanoseconds / 1e9 >
+                float(self.p['odom_timeout_sec'])):
+            speed = 0.0
+        physical_steering = float(self.p['steering_sign']) * self.requested_wheel
+        previous, current = self.gate.update_scan(
+            msg, timestamp=self.last_scan_time.nanoseconds / 1e9,
+            ego_speed_mps=speed, steering_deg=physical_steering)
         if current != previous:
             self.get_logger().warning(f'safety state: {previous} -> {current}')
 
@@ -80,6 +107,11 @@ class LidarSafetyNode(Node):
     def _wheel(self, msg):
         self.requested_wheel = int(msg.data)
         self.last_wheel_time = self.get_clock().now()
+
+    def _odom(self, msg):
+        speed = float(msg.twist.twist.linear.x)
+        self.ego_speed_mps = speed if math.isfinite(speed) else 0.0
+        self.last_odom_time = self.get_clock().now()
 
     def _command_fresh(self, now):
         if self.last_drive_time is None or self.last_wheel_time is None:
@@ -114,6 +146,14 @@ class LidarSafetyNode(Node):
         self.status_pub.publish(String(data=json.dumps({
             'state': self.gate.state,
             'front_min_distance_m': self.gate.front_min_distance,
+            'effective_roi_length_m': self.gate.effective_roi_length_m,
+            'effective_stop_distance_m': self.gate.effective_stop_distance_m,
+            'closing_speed_mps': self.gate.closing_speed_mps,
+            'ttc_sec': self.gate.ttc_sec,
+            'risk_level': self.gate.risk_level,
+            'ego_speed_mps': self.ego_speed_mps,
+            'physical_steering_deg': (
+                float(self.p['steering_sign']) * self.requested_wheel),
             'command_fresh': command_fresh,
             'publisher_conflicts': conflicts,
             'drive_unit': 'mcu_discrete_level',
