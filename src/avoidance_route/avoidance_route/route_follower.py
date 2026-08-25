@@ -9,7 +9,7 @@ import statistics
 import time
 
 import rclpy
-from geometry_msgs.msg import Point, PoseStamped, Twist
+from geometry_msgs.msg import Point, PoseStamped
 from nav_msgs.msg import Odometry, Path as PathMsg
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
@@ -22,7 +22,6 @@ from std_srvs.srv import Trigger
 from visualization_msgs.msg import Marker, MarkerArray
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from .authority import CommandAuthority, CommandAuthorityError
 from .route_following import (
     RouteError, Waypoint, avoidance_rejoin_ready, compute_control, curvature_at,
     load_route_csv, nearest_projection, normalize_angle, path_remaining,
@@ -41,7 +40,11 @@ class RouteFollower(Node):
     def __init__(self):
         super().__init__('route_follower')
         defaults = {
-            'route_file': '', 'odom_topic': '/odom', 'cmd_topic': '/cmd_vel',
+            'route_file': '', 'odom_topic': '/odom',
+            'reference_path_topic': '/avoidance/route/reference_path',
+            'reference_path_frame': 'odom',
+            'requested_drive_topic': '/avoidance/command/drive_requested',
+            'requested_wheel_topic': '/avoidance/command/wheel_requested',
             'auto_start': False, 'obstacles_enabled': False,
             'lookahead_m': 1.20, 'wheelbase_m': 0.77,
             'cruise_speed_mps': 1.0, 'max_steering_deg': 25.0,
@@ -69,7 +72,8 @@ class RouteFollower(Node):
             'avoidance_rejoin_alignment_distance_m': 1.0,
             'csv_rejoin_lookahead_m': 2.0,
             'csv_rejoin_recovery_distance_m': 6.0,
-            'gps_drive_level': 2.0,
+            'route_drive_level': 2.0, 'avoidance_drive_level': 1.0,
+            'rear_lidar_required': False,
             'scan_timeout_s': 0.30,
             'auto_start_avoidance': True,
             'path_ready_hold_sec': 0.30,
@@ -81,21 +85,21 @@ class RouteFollower(Node):
             self.declare_parameter(name, value)
         self.p = {name: self.get_parameter(name).value for name in defaults}
         qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
-        self.cmd_pub = self.create_publisher(Twist, str(self.p['cmd_topic']), 10)
         self.status_pub = self.create_publisher(String, '/avoidance/route/status', 10)
         self.metrics_pub = self.create_publisher(String, '/avoidance/route/metrics', qos)
         self.nearest_index_pub = self.create_publisher(Int32, '/avoidance/route/nearest_index', 10)
         self.lookahead_index_pub = self.create_publisher(Int32, '/avoidance/route/lookahead_index', 10)
         self.cross_track_pub = self.create_publisher(Float32, '/avoidance/route/cross_track_error', 10)
         self.steering_pub = self.create_publisher(Float32, '/avoidance/route/steering_deg', 10)
-        self.reference_pub = self.create_publisher(PathMsg, '/avoidance/route/reference_path', qos)
+        self.reference_pub = self.create_publisher(
+            PathMsg, str(self.p['reference_path_topic']), qos)
         self.actual_pub = self.create_publisher(PathMsg, '/avoidance/route/actual_path', qos)
         self.avoidance_actual_pub = self.create_publisher(
             PathMsg, '/avoidance/actual_avoidance_path', qos)
-        self.gps_drive_pub = self.create_publisher(Float32, '/gps_drive', 10)
-        self.gps_wheel_pub = self.create_publisher(Int32, '/gps_wheel', 10)
-        self.lidar_drive_pub = self.create_publisher(Float32, '/lidar_drive', 10)
-        self.lidar_wheel_pub = self.create_publisher(Int32, '/lidar_wheel', 10)
+        self.requested_drive_pub = self.create_publisher(
+            Float32, str(self.p['requested_drive_topic']), 10)
+        self.requested_wheel_pub = self.create_publisher(
+            Int32, str(self.p['requested_wheel_topic']), 10)
         self.control_source_pub = self.create_publisher(
             String, '/avoidance/control_source', qos)
         self.lookahead_marker_pub = self.create_publisher(Marker, '/avoidance/route/lookahead_marker', 10)
@@ -169,25 +173,16 @@ class RouteFollower(Node):
         self.csv_rejoin_start_xy = None
         self.avoidance_ready_since = None
         self.avoidance_auto_start_failure_logged = False
-        self.authority = None
-        try:
-            self.authority = CommandAuthority('route_follower')
-        except CommandAuthorityError as exc:
-            self._error('COMMAND_AUTHORITY_CONFLICT', str(exc))
-
         route_file = str(self.p['route_file']).strip()
-        if self.state != 'ERROR':
-            if not route_file:
-                self._error('CSV_LOAD_FAILED', 'route_file is empty')
-            else:
-                try:
-                    self.points, self.route_warnings = load_route_csv(route_file)
-                    for warning in self.route_warnings:
-                        self.get_logger().warning(f'CSV row skipped: {warning}')
-                    self.state = 'WAITING_FOR_ODOM'
-                    self._publish_reference()
-                except RouteError as exc:
-                    self._error('CSV_LOAD_FAILED', str(exc))
+        if route_file:
+            try:
+                self.points, self.route_warnings = load_route_csv(route_file)
+                for warning in self.route_warnings:
+                    self.get_logger().warning(f'CSV row skipped: {warning}')
+                self.state = 'WAITING_FOR_ODOM'
+                self._publish_reference()
+            except RouteError as exc:
+                self._error('CSV_LOAD_FAILED', str(exc))
         if bool(self.p['obstacles_enabled']):
             self.get_logger().warning('OBSTACLES ENABLED: route replay start is inhibited')
             self.start_requested = False
@@ -198,21 +193,26 @@ class RouteFollower(Node):
         self.create_subscription(
             PathMsg, str(self.p['selected_path_topic']), self._selected_path, qos)
         self.create_subscription(
+            PathMsg, str(self.p['reference_path_topic']),
+            self._reference_path, qos)
+        self.create_subscription(
             String, '/avoidance/planner_status', self._planner_status, qos)
         self.create_subscription(
             Int32, '/avoidance/selected_track_id', self._selected_track, qos)
         self.create_subscription(
             LaserScan, '/scan_front', self._scan, qos_profile_sensor_data)
-        self.create_subscription(
-            LaserScan, '/scan_rear', self._rear_scan, qos_profile_sensor_data)
+        if bool(self.p['rear_lidar_required']):
+            self.create_subscription(
+                LaserScan, '/scan_rear', self._rear_scan,
+                qos_profile_sensor_data)
         self.tf_buffer = Buffer(node=self)
         self.tf_listener = TransformListener(self.tf_buffer, self)
         period = 1.0 / max(1.0, float(self.p['control_rate_hz']))
         self.create_timer(period, self._safe_control)
         self.get_logger().info(
-            f'Route follower loaded {len(self.points)} points; wheelbase=0.77 m, '
+            f'Route follower has {len(self.points)} points; wheelbase=0.77 m, '
             f'max steering=+/-{float(self.p["max_steering_deg"]):.1f} deg; '
-            'Twist angular.z is yaw rate (rad/s)')
+            'vehicle output uses MCU discrete drive levels')
 
     @staticmethod
     def _yaw(q):
@@ -259,6 +259,38 @@ class RouteFollower(Node):
         self.last_rear_scan_stamp_ns = stamp_ns
         self.last_rear_scan_receive_time = self.get_clock().now()
 
+    def _reference_path(self, msg):
+        if len(msg.poses) < 2:
+            return
+        expected_frame = str(self.p['reference_path_frame'])
+        if msg.header.frame_id != expected_frame:
+            self.get_logger().error(
+                f'Ignoring reference path frame={msg.header.frame_id!r}; '
+                f'expected {expected_frame!r}')
+            return
+        if self.state in ('FOLLOWING', 'FOLLOWING_AVOIDANCE',
+                          'REJOINING_CSV', 'REJOIN_ALIGNING'):
+            self.get_logger().warning(
+                'Ignoring reference path replacement while vehicle is moving')
+            return
+        points = []
+        for index, stamped in enumerate(msg.poses):
+            pose = stamped.pose
+            yaw = self._yaw(pose.orientation)
+            values = (pose.position.x, pose.position.y, yaw)
+            if not all(math.isfinite(value) for value in values):
+                self.get_logger().error('Ignoring non-finite reference path')
+                return
+            points.append(Waypoint(
+                index, float(pose.position.x), float(pose.position.y), yaw,
+                1, float(self.p['route_drive_level'])))
+        self.points = tuple(points)
+        self.segment = 0
+        self.state = 'START_POSE_CHECK' if self.odom is not None else 'WAITING_FOR_ODOM'
+        self.reason = ''
+        self.get_logger().info(
+            f'Accepted external reference path with {len(self.points)} poses')
+
     @staticmethod
     def _stamp_ns(stamp):
         return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
@@ -293,7 +325,8 @@ class RouteFollower(Node):
         self._publish_stop()
         self._publish_status()
         self.get_logger().warning(
-            'STOPPED_FOR_REPLAN: exact-zero /cmd_vel latched; automatic restart disabled')
+            'STOPPED_FOR_REPLAN: exact-zero vehicle command latched; '
+            'automatic restart disabled')
 
     def _selected_track(self, msg):
         if self.state == 'FOLLOWING_AVOIDANCE' and self.avoidance_track_id >= 0:
@@ -394,12 +427,6 @@ class RouteFollower(Node):
         if self.state == 'ERROR' or not self.points:
             response.success, response.message = False, self.reason or 'route unavailable'
             self._publish_stop()
-            return response
-        conflicts = self._conflicting_publishers()
-        if conflicts:
-            self._error('COMMAND_AUTHORITY_CONFLICT', ', '.join(conflicts))
-            response.success = False
-            response.message = 'other /cmd_vel publisher: ' + ', '.join(conflicts)
             return response
         if self.odom is None:
             self.start_requested = True
@@ -510,7 +537,7 @@ class RouteFollower(Node):
         self.start_time = None
         self._publish_stop()
         if not self.time_reset_logged:
-            level = 'large simulation reset; manual restart required' if large else (
+            level = 'large clock reset; manual restart required' if large else (
                 'clock discontinuity; waiting for fresh odom/scans/exact TF')
             self.get_logger().error(f'TIME_RESET_STOP: {detail}; {level}')
             self.time_reset_logged = True
@@ -529,8 +556,9 @@ class RouteFollower(Node):
     def _time_reset_recovery_ready(self):
         if self.time_reset_is_large:
             return False
-        required = (self.odom_receive_time, self.last_scan_receive_time,
-                    self.last_rear_scan_receive_time)
+        required = [self.odom_receive_time, self.last_scan_receive_time]
+        if bool(self.p['rear_lidar_required']):
+            required.append(self.last_rear_scan_receive_time)
         if any(value is None for value in required):
             return False
         if self.time_reset_resume_state in ('FOLLOWING_AVOIDANCE', 'REJOIN_ALIGNING'):
@@ -635,31 +663,32 @@ class RouteFollower(Node):
             self._publish_status()
             return
 
-        conflicts = self._conflicting_publishers()
-        if conflicts:
-            self._error('COMMAND_AUTHORITY_CONFLICT', ', '.join(conflicts))
-            return
-
         avoiding = self.state in ('FOLLOWING_AVOIDANCE', 'REJOIN_ALIGNING')
         if avoiding:
             if self.last_scan_receive_time is None:
                 self._error('SCAN_TIMEOUT', 'no front scan received')
                 return
-            if self.last_rear_scan_receive_time is None:
-                self._error('SCAN_TIMEOUT', 'no rear scan received')
-                return
             scan_age = (now-self.last_scan_receive_time).nanoseconds/1e9
-            rear_scan_age = (now-self.last_rear_scan_receive_time).nanoseconds/1e9
             if scan_age > float(self.p['scan_timeout_s']):
                 self._error('SCAN_TIMEOUT', f'age={scan_age:.3f}s')
                 return
-            if rear_scan_age > float(self.p['scan_timeout_s']):
-                self._error('SCAN_TIMEOUT', f'rear age={rear_scan_age:.3f}s')
-                return
-            if scan_age < 0 or rear_scan_age < 0:
+            if scan_age < 0:
                 self._handle_time_jump(
-                    now, True, f'scan freshness front={scan_age:.6f} rear={rear_scan_age:.6f}')
+                    now, True, f'scan freshness front={scan_age:.6f}')
                 return
+            if bool(self.p['rear_lidar_required']):
+                if self.last_rear_scan_receive_time is None:
+                    self._error('SCAN_TIMEOUT', 'no rear scan received')
+                    return
+                rear_scan_age = (
+                    now-self.last_rear_scan_receive_time).nanoseconds/1e9
+                if rear_scan_age > float(self.p['scan_timeout_s']):
+                    self._error('SCAN_TIMEOUT', f'rear age={rear_scan_age:.3f}s')
+                    return
+                if rear_scan_age < 0:
+                    self._handle_time_jump(
+                        now, True, f'rear scan freshness={rear_scan_age:.6f}')
+                    return
             if self.selected_path_receive_time is None:
                 self._publish_stop()
                 return
@@ -808,10 +837,6 @@ class RouteFollower(Node):
         if not all(math.isfinite(value) for value in (self.speed, self.steering, angular)):
             self._error('NON_FINITE_CONTROL', 'computed command is not finite')
             return
-        command = Twist()
-        command.linear.x = self.speed
-        command.angular.z = angular
-        self.cmd_pub.publish(command)
         steering_deg = math.degrees(self.steering)
         self._publish_source_pair('LIDAR' if avoiding else 'GPS', steering_deg)
         self.cross_track_samples.append(result.nearest.distance)
@@ -827,42 +852,26 @@ class RouteFollower(Node):
     def _publish_stop(self):
         self.speed = 0.0
         self.steering = 0.0
-        self.cmd_pub.publish(Twist())
         self.steering_pub.publish(Float32(data=0.0))
-        if hasattr(self, 'gps_drive_pub'):
-            self.gps_drive_pub.publish(Float32(data=0.0))
-            self.gps_wheel_pub.publish(Int32(data=0))
-            self.lidar_drive_pub.publish(Float32(data=0.0))
-            self.lidar_wheel_pub.publish(Int32(data=0))
+        if hasattr(self, 'requested_drive_pub'):
+            self.requested_drive_pub.publish(Float32(data=0.0))
+            self.requested_wheel_pub.publish(Int32(data=0))
             self.control_source = 'STOP'
             self.control_source_pub.publish(String(data='STOP'))
 
     def _publish_source_pair(self, source, steering_deg):
         wheel = int(round(-steering_deg))
         if source == 'GPS':
-            self.gps_drive_pub.publish(Float32(data=float(self.p['gps_drive_level'])))
-            self.gps_wheel_pub.publish(Int32(data=wheel))
-            self.lidar_drive_pub.publish(Float32(data=0.0))
-            self.lidar_wheel_pub.publish(Int32(data=0))
+            drive = float(self.p['route_drive_level'])
         elif source == 'LIDAR':
-            self.gps_drive_pub.publish(Float32(data=0.0))
-            self.gps_wheel_pub.publish(Int32(data=0))
-            self.lidar_drive_pub.publish(Float32(data=1.0))
-            self.lidar_wheel_pub.publish(Int32(data=wheel))
+            drive = float(self.p['avoidance_drive_level'])
         else:
             self._publish_stop()
             return
+        self.requested_drive_pub.publish(Float32(data=drive))
+        self.requested_wheel_pub.publish(Int32(data=max(-27, min(27, wheel))))
         self.control_source = source
         self.control_source_pub.publish(String(data=source))
-
-    def _conflicting_publishers(self):
-        allowed = {self.get_name(), 'ros_gz_bridge'}
-        conflicts = []
-        for endpoint in self.get_publishers_info_by_topic(str(self.p['cmd_topic'])):
-            if endpoint.node_name not in allowed:
-                namespace = endpoint.node_namespace.rstrip('/')
-                conflicts.append(f'{namespace}/{endpoint.node_name}')
-        return sorted(set(conflicts))
 
     def _error(self, reason, detail):
         self.state, self.reason = 'ERROR', reason
@@ -873,7 +882,7 @@ class RouteFollower(Node):
 
     def _publish_reference(self):
         path = PathMsg()
-        path.header.frame_id = 'odom'
+        path.header.frame_id = str(self.p['reference_path_frame'])
         path.header.stamp = self.get_clock().now().to_msg()
         for point in self.points:
             pose = PoseStamped()
@@ -1118,8 +1127,6 @@ class RouteFollower(Node):
             self._publish_stop()
             time.sleep(0.02)
         self._close_actual_log()
-        if self.authority is not None:
-            self.authority.close()
         super().destroy_node()
 
 

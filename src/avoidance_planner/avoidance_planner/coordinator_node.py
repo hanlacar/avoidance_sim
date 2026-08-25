@@ -1,8 +1,8 @@
 """ROS coordinator for perception, safe stop, and stopped local planning.
 
-This node never publishes ``/cmd_vel`` and never drives a selected path.  It
-publishes a latched stop/replan contract; the existing route_follower remains
-the sole Gazebo command authority.
+This node never publishes vehicle commands and never drives a selected path.
+It publishes a latched stop/replan contract; the route follower requests
+commands through the independent LiDAR safety gate.
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -50,6 +50,7 @@ class AvoidanceCoordinator(Node):
         super().__init__('avoidance_coordinator')
         defaults = {
             'front_scan_topic': '/scan_front', 'rear_scan_topic': '/scan_rear',
+            'rear_lidar_required': False,
             'odom_topic': '/odom',
             'reference_path_topic': '/avoidance/route/reference_path',
             'target_frame': 'odom', 'planning_roi_x_min_m': 0.10,
@@ -212,6 +213,8 @@ class AvoidanceCoordinator(Node):
         self.last_rear_scan_stamp_ns = None
         self.pending_scans = deque()
         self.tf_ready_frames = set()
+        self.front_tf_ready = False
+        self.rear_tf_ready = False
         self.tf_ready = False
         self.startup_tf_drop_count = 0
         self.runtime_tf_drop_count = 0
@@ -247,9 +250,10 @@ class AvoidanceCoordinator(Node):
         self.create_subscription(
             LaserScan, str(self.p['front_scan_topic']), self._front_scan,
             qos_profile_sensor_data)
-        self.create_subscription(
-            LaserScan, str(self.p['rear_scan_topic']), self._rear_scan,
-            qos_profile_sensor_data)
+        if bool(self.p['rear_lidar_required']):
+            self.create_subscription(
+                LaserScan, str(self.p['rear_scan_topic']), self._rear_scan,
+                qos_profile_sensor_data)
         self.create_subscription(
             Odometry, str(self.p['odom_topic']), self._odom, 20)
         self.create_subscription(
@@ -262,8 +266,8 @@ class AvoidanceCoordinator(Node):
             Float32(data=float(self.p['replan_trigger_distance_m'])))
         self._publish_status()
         self.get_logger().info(
-            'Avoidance planner waiting for exact-timestamp front/rear TF readiness; '
-            'perception/planning separated; no /cmd_vel publisher')
+            'Avoidance planner waiting for exact-timestamp front LiDAR TF; '
+            'perception/planning and vehicle safety are separated')
 
     def _validate_parameters(self):
         if float(self.p['wheelbase_m']) <= 0.0:
@@ -444,10 +448,15 @@ class AvoidanceCoordinator(Node):
             transform, category, detail = self._lookup_transform(scan)
             if transform is not None:
                 self.tf_ready_frames.add(scan.header.frame_id)
-                if {'laser_link', 'rear_laser_link'} <= self.tf_ready_frames:
-                    self.tf_ready = True
                 if is_front:
+                    self.front_tf_ready = True
                     self._process_scan(scan, transform)
+                else:
+                    self.rear_tf_ready = True
+                self.tf_ready = (
+                    self.front_tf_ready and
+                    (not bool(self.p['rear_lidar_required']) or
+                     self.rear_tf_ready))
                 continue
             if now-received < timeout:
                 remaining.append((scan, is_front, received))
@@ -659,6 +668,8 @@ class AvoidanceCoordinator(Node):
         self.stopped_since = None
         self.pending_scans.clear()
         self.tf_ready_frames.clear()
+        self.front_tf_ready = False
+        self.rear_tf_ready = False
         self.tf_ready = False
         self.last_scan_stamp = None
         self.replan_pub.publish(Bool(data=True))
@@ -667,9 +678,12 @@ class AvoidanceCoordinator(Node):
             f'{"manual restart required" if large else "waiting for fresh exact-stamp inputs"}')
 
     def _time_reset_recovery_ready(self):
-        return (not self.time_reset_is_large and self.odom_receive_time is not None and
-                self.last_front_scan_time is not None and
-                self.last_rear_scan_time is not None and self.tf_ready)
+        rear_ready = (not bool(self.p['rear_lidar_required']) or
+                      self.last_rear_scan_time is not None)
+        return (not self.time_reset_is_large and
+                self.odom_receive_time is not None and
+                self.last_front_scan_time is not None and rear_ready and
+                self.tf_ready)
 
     def _tick(self):
         now = self.get_clock().now()
@@ -703,7 +717,7 @@ class AvoidanceCoordinator(Node):
                         pose.header.stamp = stamp
                     self.selected_path_pub.publish(self.selected_path_msg)
                 self.get_logger().warning(
-                    'TIME_RECOVERED: fresh odom/front/rear scans and exact TF verified')
+                    'TIME_RECOVERED: fresh odom/front scan and exact TF verified')
             self._publish_status()
             return
         if not self.tf_ready or self.odom is None or len(self.route) < 2:

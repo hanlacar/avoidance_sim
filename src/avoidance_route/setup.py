@@ -19,7 +19,6 @@ setup(
     entry_points={'console_scripts': [
         'route_recorder = avoidance_route.route_recorder:main',
         'route_visualizer = avoidance_route.route_visualizer:main',
-        'manual_teleop = avoidance_route.manual_teleop:main',
         'route_follower = avoidance_route.route_follower:main',
     ]},
 )

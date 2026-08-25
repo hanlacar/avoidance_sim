@@ -1,0 +1,19 @@
+lidar_safety:
+  ros__parameters:
+    scan_topic: /scan_front
+    requested_drive_topic: /avoidance/command/drive_requested
+    requested_wheel_topic: /avoidance/command/wheel_requested
+    drive_topic: /lidar_drive
+    wheel_topic: /lidar_wheel
+    stop_distance_m: 0.50
+    resume_distance_m: 0.60
+    emergency_stop_distance_m: 0.30
+    front_sector_deg: 30.0
+    min_valid_range_m: 0.05
+    stop_confirm_scans: 2
+    clear_confirm_scans: 3
+    scan_timeout_sec: 0.50
+    command_timeout_sec: 0.30
+    stop_on_scan_timeout: true
+    steering_limit_deg: 27
+    publish_rate_hz: 20.0

@@ -19,5 +19,6 @@ setup(
     extras_require={'test': ['pytest']},
     entry_points={'console_scripts': [
         'front_lidar_detector = avoidance_lidar.front_lidar_node:main',
+        'lidar_safety = avoidance_lidar.safety_node:main',
     ]},
 )

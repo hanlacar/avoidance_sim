@@ -210,7 +210,7 @@ def compute_control(points, x, y, yaw, start_segment, lookahead_m,
     steering = limit_steering(
         previous_steering, requested, max_steering_delta_rad)
     nearest_index = nearest.segment + (1 if nearest.ratio >= 0.5 else 0)
-    # angular.z is yaw rate for Gazebo's Twist Ackermann interface.
+    # angular_rate remains an internal kinematic diagnostic.
     return ControlResult(nearest, nearest_index, lookahead_index, tx, ty,
                          steering, math.tan(steering) / wheelbase_m, requested)
 

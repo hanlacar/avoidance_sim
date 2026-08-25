@@ -1,0 +1,11 @@
+front_rplidar_node:
+  ros__parameters:
+    channel_type: serial
+    serial_port: /dev/ttyUSB0
+    serial_baudrate: 256000
+    frame_id: front_laser
+    inverted: false
+    angle_compensate: true
+    flip_x_axis: true
+    scan_mode: Sensitivity
+    topic_name: /scan_front

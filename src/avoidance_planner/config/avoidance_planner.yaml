@@ -2,6 +2,7 @@ avoidance_coordinator:
   ros__parameters:
     front_scan_topic: /scan_front
     rear_scan_topic: /scan_rear
+    rear_lidar_required: false
     odom_topic: /odom
     reference_path_topic: /avoidance/route/reference_path
     target_frame: odom

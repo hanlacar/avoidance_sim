@@ -1,4 +1,4 @@
-"""Record actual Gazebo odometry in a mission_manager-compatible CSV."""
+"""Record real vehicle odometry in a mission_manager-compatible CSV."""
 
 import csv
 from datetime import datetime, timezone
@@ -6,7 +6,7 @@ import math
 from pathlib import Path
 
 import rclpy
-from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry, Path as PathMsg
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
@@ -19,7 +19,7 @@ class RouteRecorder(Node):
     def __init__(self):
         super().__init__('route_recorder')
         defaults = {
-            'out_csv': '', 'odom_topic': '/odom', 'cmd_topic': '/cmd_vel',
+            'out_csv': '', 'odom_topic': '/odom',
             'min_distance_m': 0.10, 'min_period_s': 0.10,
             'direction_deadband_mps': 0.02, 'record_direction': 'forward',
             'record_mode': 'NORMAL', 'record_drive_level': 1.0,
@@ -33,7 +33,8 @@ class RouteRecorder(Node):
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         self.min_distance = max(0.0, float(self.get_parameter('min_distance_m').value))
         self.min_period = max(0.0, float(self.get_parameter('min_period_s').value))
-        self.deadband = max(0.0, float(self.get_parameter('direction_deadband_mps').value))
+        self.deadband = max(
+            0.0, float(self.get_parameter('direction_deadband_mps').value))
         self.direction = 1 if str(self.get_parameter('record_direction').value).lower() == 'forward' else -1
         self.mode = str(self.get_parameter('record_mode').value).strip()
         self.drive_level = float(self.get_parameter('record_drive_level').value)
@@ -56,8 +57,6 @@ class RouteRecorder(Node):
             PathMsg, '/avoidance/route/saved_path', qos)
         self.create_subscription(
             Odometry, str(self.get_parameter('odom_topic').value), self._odom, 20)
-        self.create_subscription(
-            Twist, str(self.get_parameter('cmd_topic').value), self._cmd, 10)
         self.get_logger().info(
             f'Recording actual odometry to {self.output_path} '
             f'(distance>={self.min_distance:.3f} m, period>={self.min_period:.3f} s)')
@@ -66,16 +65,10 @@ class RouteRecorder(Node):
         metadata = {
             'format_version': 1, 'origin_lat': 0.0, 'origin_lon': 0.0,
             'loop': False, 'created_at': datetime.now(timezone.utc).isoformat(),
-            'coordinate_source': 'gazebo_odometry', 'yaw_unit': 'radian',
+            'coordinate_source': 'vehicle_odometry', 'yaw_unit': 'radian',
         }
         with self.output_path.with_suffix('.yaml').open('x', encoding='utf-8') as stream:
             yaml.safe_dump(metadata, stream, sort_keys=False)
-
-    def _cmd(self, msg):
-        if msg.linear.x > self.deadband:
-            self.direction = 1
-        elif msg.linear.x < -self.deadband:
-            self.direction = -1
 
     @staticmethod
     def _yaw(q):
@@ -83,6 +76,10 @@ class RouteRecorder(Node):
                           1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
     def _odom(self, msg):
+        if msg.twist.twist.linear.x > self.deadband:
+            self.direction = 1
+        elif msg.twist.twist.linear.x < -self.deadband:
+            self.direction = -1
         pose = msg.pose.pose
         values = (pose.position.x, pose.position.y, pose.orientation.x,
                   pose.orientation.y, pose.orientation.z, pose.orientation.w)

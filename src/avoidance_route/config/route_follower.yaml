@@ -1,7 +1,10 @@
 route_follower:
   ros__parameters:
     odom_topic: /odom
-    cmd_topic: /cmd_vel
+    reference_path_topic: /avoidance/route/reference_path
+    reference_path_frame: odom
+    requested_drive_topic: /avoidance/command/drive_requested
+    requested_wheel_topic: /avoidance/command/wheel_requested
     lookahead_m: 1.20
     wheelbase_m: 0.77
     cruise_speed_mps: 1.00
@@ -33,5 +36,8 @@ route_follower:
     path_ready_hold_sec: 0.30
     csv_rejoin_lookahead_m: 2.0
     csv_rejoin_recovery_distance_m: 6.0
-    gps_drive_level: 2.0
+    # MCU contract: discrete drive level, not m/s.
+    route_drive_level: 2.0
+    avoidance_drive_level: 1.0
+    rear_lidar_required: false
     scan_timeout_s: 0.30

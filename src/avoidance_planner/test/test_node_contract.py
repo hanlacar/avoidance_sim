@@ -25,9 +25,10 @@ def test_planner_latches_replan_but_does_not_compete_for_mcu_outputs():
     assert fake.replan_pub.publish.call_args.args[0].data is True
 
 
-def test_planner_has_no_cmd_vel_publisher_contract():
+def test_planner_has_no_vehicle_command_publisher_contract():
     source = __import__('inspect').getsource(AvoidanceCoordinator.__init__)
-    assert "create_publisher(Twist" not in source
+    assert '/lidar_drive' not in source
+    assert '/lidar_wheel' not in source
 
 
 def test_fixed_environment_filters_apparent_dynamic_surface_tracks():

@@ -1,8 +1,7 @@
 """ROS-independent LaserScan filtering and clustering helpers.
 
-The consecutive-point Euclidean clustering follows the proven approach in
-Lidar_ws/lidar_parking_planner/obstacle_tracker.py, narrowed to a rectangular
-front ROI and with no motion-control output.
+Consecutive-point Euclidean clustering is restricted to a configurable front
+ROI and intentionally has no motion-control output.
 """
 
 from dataclasses import dataclass

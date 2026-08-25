@@ -145,10 +145,14 @@ def test_goal_tolerance_reaches_goal():
 
 
 def test_shutdown_stop_command_is_exact_zero():
-    fake = SimpleNamespace(speed=1.0, steering=0.2, cmd_pub=Mock(), steering_pub=Mock())
+    fake = SimpleNamespace(
+        speed=1.0, steering=0.2, steering_pub=Mock(),
+        requested_drive_pub=Mock(), requested_wheel_pub=Mock(),
+        control_source_pub=Mock(), control_source='GPS')
     RouteFollower._publish_stop(fake)
-    command = fake.cmd_pub.publish.call_args.args[0]
-    assert command.linear.x == 0.0 and command.angular.z == 0.0
+    assert fake.requested_drive_pub.publish.call_args.args[0].data == 0.0
+    assert fake.requested_wheel_pub.publish.call_args.args[0].data == 0
+    assert fake.speed == 0.0 and fake.steering == 0.0
     assert fake.steering_pub.publish.call_args.args[0].data == 0.0
 
 
@@ -205,6 +209,7 @@ def test_time_reset_recovery_requires_all_inputs_path_and_exact_tf():
     fake = SimpleNamespace(
         time_reset_is_large=False,
         time_reset_resume_state='FOLLOWING_AVOIDANCE',
+        p={'rear_lidar_required': False},
         odom_receive_time=token, last_scan_receive_time=token,
         last_rear_scan_receive_time=token, selected_path_receive_time=None,
         _tf_is_valid=Mock(return_value=True))
@@ -215,7 +220,7 @@ def test_time_reset_recovery_requires_all_inputs_path_and_exact_tf():
     assert not RouteFollower._time_reset_recovery_ready(fake)
 
 
-def test_large_simulation_reset_never_auto_recovers():
+def test_large_clock_reset_never_auto_recovers():
     fake = SimpleNamespace(time_reset_is_large=True)
     assert not RouteFollower._time_reset_recovery_ready(fake)
 
@@ -226,14 +231,6 @@ def test_compute_control_reports_indices_and_finite_yaw_rate():
     assert result.nearest_index == 0 and result.lookahead_index == 1
     assert result.steering_rad == pytest.approx(0.0)
     assert math.isfinite(result.angular_rate)
-
-
-def test_manual_teleop_publisher_is_reported_as_conflict():
-    endpoint = SimpleNamespace(node_name='manual_teleop', node_namespace='/')
-    fake = SimpleNamespace(
-        p={'cmd_topic': '/cmd_vel'}, get_name=lambda: 'route_follower',
-        get_publishers_info_by_topic=lambda _topic: [endpoint])
-    assert RouteFollower._conflicting_publishers(fake) == ['/manual_teleop']
 
 
 def test_replan_request_latches_exact_stop_without_restart():
@@ -260,21 +257,48 @@ def test_completed_track_replan_is_ignored_until_false_acknowledgement():
     assert not fake.replan_ignore_until_clear
 
 
-def test_gps_and_lidar_outputs_are_never_cross_paired():
+def test_route_and_avoidance_use_one_requested_command_pair():
     fake = SimpleNamespace(
-        p={'gps_drive_level': 2.0}, gps_drive_pub=Mock(), gps_wheel_pub=Mock(),
-        lidar_drive_pub=Mock(), lidar_wheel_pub=Mock(), control_source_pub=Mock(),
+        p={'route_drive_level': 2.0, 'avoidance_drive_level': 1.0},
+        requested_drive_pub=Mock(), requested_wheel_pub=Mock(),
+        control_source_pub=Mock(),
         control_source='STOP', _publish_stop=Mock())
     RouteFollower._publish_source_pair(fake, 'GPS', 7.4)
-    assert fake.gps_drive_pub.publish.call_args.args[0].data == 2.0
-    assert fake.gps_wheel_pub.publish.call_args.args[0].data == 7
-    assert fake.lidar_drive_pub.publish.call_args.args[0].data == 0.0
-    assert fake.lidar_wheel_pub.publish.call_args.args[0].data == 0
+    assert fake.requested_drive_pub.publish.call_args.args[0].data == 2.0
+    assert fake.requested_wheel_pub.publish.call_args.args[0].data == -7
     RouteFollower._publish_source_pair(fake, 'LIDAR', -6.6)
-    assert fake.gps_drive_pub.publish.call_args.args[0].data == 0.0
-    assert fake.gps_wheel_pub.publish.call_args.args[0].data == 0
-    assert fake.lidar_drive_pub.publish.call_args.args[0].data == 1.0
-    assert fake.lidar_wheel_pub.publish.call_args.args[0].data == -7
+    assert fake.requested_drive_pub.publish.call_args.args[0].data == 1.0
+    assert fake.requested_wheel_pub.publish.call_args.args[0].data == 7
+
+
+def test_requested_wheel_is_saturated_to_vehicle_contract():
+    fake = SimpleNamespace(
+        p={'route_drive_level': 2.0, 'avoidance_drive_level': 1.0},
+        requested_drive_pub=Mock(), requested_wheel_pub=Mock(),
+        control_source_pub=Mock(), control_source='STOP', _publish_stop=Mock())
+    RouteFollower._publish_source_pair(fake, 'LIDAR', -80.0)
+    assert fake.requested_wheel_pub.publish.call_args.args[0].data == 27
+
+
+def test_external_reference_path_is_accepted_without_csv():
+    from geometry_msgs.msg import PoseStamped
+    from nav_msgs.msg import Path as PathMsg
+    path = PathMsg()
+    path.header.frame_id = 'odom'
+    for x in (0.0, 1.0):
+        pose = PoseStamped()
+        pose.pose.position.x = x
+        pose.pose.orientation.w = 1.0
+        path.poses.append(pose)
+    fake = SimpleNamespace(
+        p={'reference_path_frame': 'odom', 'route_drive_level': 2.0},
+        state='WAITING_FOR_ROUTE', odom=None, segment=99, points=(), reason='old',
+        _yaw=RouteFollower._yaw,
+        get_logger=lambda: Mock())
+    RouteFollower._reference_path(fake, path)
+    assert fake.state == 'WAITING_FOR_ODOM'
+    assert fake.segment == 0 and len(fake.points) == 2
+    assert all(point.drive_level == 2.0 for point in fake.points)
 
 
 def test_follower_rejects_unclamped_over_limit_control():

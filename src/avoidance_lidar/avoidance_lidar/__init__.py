@@ -1,1 +1,1 @@
-"""Front-LiDAR diagnostics for the avoidance simulation."""
+"""Front-LiDAR perception and real-vehicle safety components."""
