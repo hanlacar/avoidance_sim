@@ -838,7 +838,7 @@ class RouteFollower(Node):
             self.control_source_pub.publish(String(data='STOP'))
 
     def _publish_source_pair(self, source, steering_deg):
-        wheel = int(round(steering_deg))
+        wheel = int(round(-steering_deg))
         if source == 'GPS':
             self.gps_drive_pub.publish(Float32(data=float(self.p['gps_drive_level'])))
             self.gps_wheel_pub.publish(Int32(data=wheel))
