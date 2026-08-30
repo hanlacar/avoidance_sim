@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 import math
 
-from .geometry import Box2, footprint_frenet_bounds, boxes_intersect
+from .geometry import Box2, boxes_intersect, footprint_frenet_bounds
 from .local_planner import observed_surface_to_frenet_box, project_route
 
 
@@ -18,6 +18,7 @@ class CollisionRisk:
     vehicle_front_surface_distance: float = math.inf
     obstacle_center_distance: float = math.inf
     collision_point_distance: float = math.inf
+    collision_path_distance: float = math.inf
 
 
 def track_box(track, minimum_depth=0.15, minimum_width=0.08):
@@ -76,6 +77,11 @@ def evaluate_track_collision(path, current_pose, track, vehicle_length,
         possible_obstacle = local_raw_obstacle
     obstacle = possible_obstacle.inflated(
         longitudinal_safety, lateral_safety)
+    current_s = project_route(path, current_pose.x, current_pose.y, nearest).s
+    front_extent = vehicle_length/2.0+center_offset
+    # A return wholly behind the current front bumper cannot be a forward
+    # avoidance trigger, even if the rear half of the footprint overlaps it.
+    obstacle_ahead = local_raw_obstacle.max_x > current_s+front_extent
     collision_index = -1
     for index in range(nearest, len(path)):
         forward = lengths[index]-lengths[nearest]
@@ -84,19 +90,27 @@ def evaluate_track_collision(path, current_pose, track, vehicle_length,
         footprint, _ = footprint_frenet_bounds(
             path[index], path, vehicle_length, vehicle_width, center_offset,
             max(nearest, index-3))
-        if (footprint.max_y > left_boundary or footprint.min_y < right_boundary or
+        if obstacle_ahead and (
+                footprint.max_y > left_boundary or
+                footprint.min_y < right_boundary or
                 boxes_intersect(footprint, obstacle)):
             collision_index = index
             break
     distance = math.hypot(track.x-current_pose.x, track.y-current_pose.y)
     ahead = lengths[collision_index]-lengths[nearest] if collision_index >= 0 else math.inf
-    current_s = project_route(path, current_pose.x, current_pose.y, nearest).s
     surface_from_base = local_raw_obstacle.min_x-current_s
     lidar_surface = surface_from_base-lidar_x_offset
     vehicle_front_surface = surface_from_base-vehicle_length/2.0-center_offset
     return CollisionRisk(collision_index >= 0, nearest, collision_index,
                          ahead, lidar_surface <= emergency_distance,
-                         lidar_surface, vehicle_front_surface, distance, ahead)
+                         lidar_surface, vehicle_front_surface, distance, ahead,
+                         ahead)
+
+
+def risk_within_activation_distance(risk, trigger_distance):
+    """Check for a forward swept-footprint collision inside the limit."""
+    return (risk.required and math.isfinite(risk.collision_path_distance) and
+            0.0 <= risk.collision_path_distance <= trigger_distance)
 
 
 class ReplanDebounce:

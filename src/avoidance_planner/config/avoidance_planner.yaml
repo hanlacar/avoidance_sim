@@ -55,6 +55,9 @@ avoidance_coordinator:
     right_curb_inner_y_m: -1.095
     obstacle_monitor_distance_m: 5.0
     replan_trigger_distance_m: 2.0
+    # Trigger distance is the reference-path travel from the current front
+    # bumper to the first swept-footprint collision pose (not LiDAR range).
+    collision_confirmation_frames: 3
     front_lidar_x_offset_m: 0.65
     emergency_stop_distance_m: 0.5
     stopped_linear_speed_mps: 0.03
@@ -69,3 +72,10 @@ avoidance_coordinator:
     lateral_target_samples: 7
     marker_lifetime_sec: 2.0
     planning_rate_hz: 10.0
+    mode_topic: /mcu/current_mode
+    allowed_avoidance_modes: ['5']
+    avoidance_active_topic: /avoidance/active
+    active_publish_rate_hz: 10.0
+    odom_timeout_sec: 0.50
+    # Static camera/GPS paths may be transient-local; zero disables aging.
+    reference_path_timeout_sec: 0.0

@@ -1,6 +1,8 @@
 import math
+from types import SimpleNamespace
 
 from avoidance_lidar.safety import LidarSafetyGate, clamp_steering
+from avoidance_lidar.safety_node import LidarSafetyNode
 
 
 class Scan:
@@ -114,3 +116,16 @@ def test_final_steering_saturation_never_exceeds_27_degrees():
     assert clamp_steering(80, 27) == 27
     assert clamp_steering(-80, 27) == -27
     assert clamp_steering(12, 25) == 12
+
+
+def test_safety_authority_requires_mode_five_active_fresh_heartbeat():
+    from rclpy.time import Time
+    now = Time(nanoseconds=1_000_000_000)
+    fake = SimpleNamespace(
+        current_mode='5', active=True,
+        last_active_time=Time(nanoseconds=800_000_000),
+        p={'allowed_avoidance_modes': ['5'], 'active_timeout_sec': 0.30})
+    fake._mode_allowed = lambda: LidarSafetyNode._mode_allowed(fake)
+    assert LidarSafetyNode._active_authority_valid(fake, now)
+    fake.current_mode = '4'
+    assert not LidarSafetyNode._active_authority_valid(fake, now)

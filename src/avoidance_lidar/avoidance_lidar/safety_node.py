@@ -38,6 +38,10 @@ class LidarSafetyNode(Node):
             'stop_on_scan_timeout': True, 'steering_limit_deg': 27,
             'publish_rate_hz': 20.0, 'odom_topic': '/odom',
             'odom_timeout_sec': 0.50, 'steering_sign': -1.0,
+            'active_topic': '/avoidance/active',
+            'active_timeout_sec': 0.30,
+            'mode_topic': '/mcu/current_mode',
+            'allowed_avoidance_modes': ['5'],
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -63,6 +67,9 @@ class LidarSafetyNode(Node):
         self.last_wheel_time = None
         self.last_odom_time = None
         self.ego_speed_mps = 0.0
+        self.active = False
+        self.last_active_time = None
+        self.current_mode = None
         self.drive_pub = self.create_publisher(
             Float32, str(self.p['drive_topic']), 10)
         self.wheel_pub = self.create_publisher(
@@ -80,6 +87,10 @@ class LidarSafetyNode(Node):
             Int32, str(self.p['requested_wheel_topic']), self._wheel, 10)
         self.create_subscription(
             Odometry, str(self.p['odom_topic']), self._odom, 10)
+        self.create_subscription(
+            Bool, str(self.p['active_topic']), self._active, 10)
+        self.create_subscription(
+            String, str(self.p['mode_topic']), self._mode, 10)
         self.create_timer(
             1.0 / max(1.0, float(self.p['publish_rate_hz'])), self._tick)
         self.get_logger().info(
@@ -113,6 +124,26 @@ class LidarSafetyNode(Node):
         self.ego_speed_mps = speed if math.isfinite(speed) else 0.0
         self.last_odom_time = self.get_clock().now()
 
+    def _active(self, msg):
+        self.active = bool(msg.data)
+        self.last_active_time = self.get_clock().now()
+
+    def _mode(self, msg):
+        self.current_mode = str(msg.data).strip()
+        if not self._mode_allowed():
+            self.active = False
+
+    def _mode_allowed(self):
+        return self.current_mode in {
+            str(value).strip() for value in self.p['allowed_avoidance_modes']}
+
+    def _active_authority_valid(self, now):
+        if (not self._mode_allowed() or not self.active or
+                self.last_active_time is None):
+            return False
+        age = (now-self.last_active_time).nanoseconds/1e9
+        return 0.0 <= age <= float(self.p['active_timeout_sec'])
+
     def _command_fresh(self, now):
         if self.last_drive_time is None or self.last_wheel_time is None:
             return False
@@ -130,6 +161,24 @@ class LidarSafetyNode(Node):
 
     def _tick(self):
         now = self.get_clock().now()
+        authority_active = self._active_authority_valid(now)
+        if not authority_active:
+            active_heartbeat_stale = bool(
+                self.active and self._mode_allowed() and
+                self.last_active_time is not None)
+            self.drive_pub.publish(Float32(data=0.0))
+            self.wheel_pub.publish(Int32(data=0))
+            self.stop_pub.publish(Bool(data=active_heartbeat_stale))
+            self.status_pub.publish(String(data=json.dumps({
+                'state': ('ACTIVE_HEARTBEAT_TIMEOUT'
+                          if active_heartbeat_stale else 'INACTIVE'),
+                'avoidance_active': self.active,
+                'mode_allowed': self._mode_allowed(),
+                'mcu_mode': self.current_mode,
+                'output_drive': 0.0,
+                'output_wheel_deg': 0,
+            }, sort_keys=True)))
+            return
         if self.last_scan_time is not None:
             self.gate.update_timeout((now - self.last_scan_time).nanoseconds / 1e9)
         conflicts = self._publisher_conflicts()
@@ -159,6 +208,9 @@ class LidarSafetyNode(Node):
             'drive_unit': 'mcu_discrete_level',
             'output_drive': drive,
             'output_wheel_deg': wheel,
+            'avoidance_active': True,
+            'mode_allowed': True,
+            'mcu_mode': self.current_mode,
         }, sort_keys=True)))
 
     def stop(self):

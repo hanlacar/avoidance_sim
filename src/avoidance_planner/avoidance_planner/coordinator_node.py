@@ -28,7 +28,8 @@ from tf2_ros import Buffer, TransformException, TransformListener
 from visualization_msgs.msg import Marker, MarkerArray
 
 from .collision_evaluator import (
-    ReplanDebounce, evaluate_track_collision, track_box)
+    ReplanDebounce, evaluate_track_collision, risk_within_activation_distance,
+    track_box)
 from .geometry import Pose2
 from .local_planner import (interpolate_route, plan_candidates, project_route,
                             route_lengths)
@@ -108,6 +109,13 @@ class AvoidanceCoordinator(Node):
             'marker_lifetime_sec': 2.0, 'planning_rate_hz': 20.0,
             'clock_forward_jump_threshold_s': 2.0,
             'clock_reset_threshold_s': 1.0,
+            'mode_topic': '/mcu/current_mode',
+            'allowed_avoidance_modes': ['5'],
+            'avoidance_active_topic': '/avoidance/active',
+            'active_publish_rate_hz': 10.0,
+            'collision_confirmation_frames': 3,
+            'odom_timeout_sec': 0.50,
+            'reference_path_timeout_sec': 0.0,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -117,6 +125,8 @@ class AvoidanceCoordinator(Node):
         transient = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.replan_pub = self.create_publisher(
             Bool, '/avoidance/replan_required', transient)
+        self.active_pub = self.create_publisher(
+            Bool, str(self.p['avoidance_active_topic']), 10)
         self.status_pub = self.create_publisher(
             String, '/avoidance/planner_status', transient)
         self.selected_path_pub = self.create_publisher(
@@ -147,6 +157,8 @@ class AvoidanceCoordinator(Node):
             Float32, '/avoidance/obstacle_center_distance', transient)
         self.collision_point_distance_pub = self.create_publisher(
             Float32, '/avoidance/collision_point_distance', transient)
+        self.collision_path_distance_pub = self.create_publisher(
+            Float32, '/avoidance/collision_path_distance', transient)
         self.replan_threshold_pub = self.create_publisher(
             Float32, '/avoidance/replan_threshold', transient)
         self.selected_track_pub = self.create_publisher(
@@ -184,8 +196,7 @@ class AvoidanceCoordinator(Node):
             int(self.p['static_confirmation_frames']),
             int(self.p['dynamic_min_observations']))
         self.debounce = ReplanDebounce(
-            1 if bool(self.p['fixed_environment_mode']) else
-            int(self.p['confirmation_frames']))
+            int(self.p['collision_confirmation_frames']))
         self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix='local_planner')
         self.future = None
         self.state = 'FOLLOWING_CSV'
@@ -194,6 +205,11 @@ class AvoidanceCoordinator(Node):
         self.odom = None
         self.odom_receive_time = None
         self.last_odom_stamp_ns = None
+        self.reference_receive_time = None
+        self.current_mode = None
+        self.active = False
+        self.operational_state = 'INACTIVE'
+        self.last_collision_evaluation_scan_count = -1
         self.route = ()
         self.route_nearest_index = 0
         self.tracks = ()
@@ -260,8 +276,14 @@ class AvoidanceCoordinator(Node):
             Path, str(self.p['reference_path_topic']), self._reference, transient)
         self.create_subscription(
             String, '/avoidance/control_source', self._control_source, transient)
+        self.create_subscription(
+            String, str(self.p['mode_topic']), self._mcu_mode, 10)
         self.create_timer(1.0/max(1.0, float(self.p['planning_rate_hz'])), self._tick)
+        self.create_timer(
+            1.0/max(1.0, float(self.p['active_publish_rate_hz'])),
+            self._publish_active)
         self.replan_pub.publish(Bool(data=False))
+        self._publish_active()
         self.replan_threshold_pub.publish(
             Float32(data=float(self.p['replan_trigger_distance_m'])))
         self._publish_status()
@@ -276,6 +298,10 @@ class AvoidanceCoordinator(Node):
             raise ValueError('max_steering_deg must be in (0, 25]')
         if float(self.p['left_curb_inner_y_m']) <= float(self.p['right_curb_inner_y_m']):
             raise ValueError('curb boundaries are inverted')
+        if int(self.p.get('collision_confirmation_frames', 3)) < 1:
+            raise ValueError('collision_confirmation_frames must be >= 1')
+        if not self.p.get('allowed_avoidance_modes', ['5']):
+            raise ValueError('allowed_avoidance_modes must not be empty')
 
     @staticmethod
     def _yaw(q):
@@ -300,6 +326,16 @@ class AvoidanceCoordinator(Node):
         return forward > required
 
     def _odom(self, msg):
+        pose = msg.pose.pose
+        values = (pose.position.x, pose.position.y, pose.orientation.x,
+                  pose.orientation.y, pose.orientation.z, pose.orientation.w)
+        if (msg.header.frame_id != str(self.p['target_frame']) or
+                not all(math.isfinite(value) for value in values)):
+            self.debounce.update(False)
+            if self.active:
+                self.operational_state = 'SAFE_STOP'
+                self._set_state('ERROR', 'invalid odometry')
+            return
         stamp_ns = Time.from_msg(msg.header.stamp).nanoseconds
         if self._stamp_regressed('odom', stamp_ns, self.last_odom_stamp_ns):
             return
@@ -308,17 +344,73 @@ class AvoidanceCoordinator(Node):
         self.odom_receive_time = self.get_clock().now()
 
     def _reference(self, msg):
+        if msg.header.frame_id != str(self.p['target_frame']):
+            self.debounce.update(False)
+            if self.active:
+                self.operational_state = 'SAFE_STOP'
+                self._set_state(
+                    'ERROR', f'invalid reference frame {msg.header.frame_id!r}')
+            return
         route = []
         for stamped in msg.poses:
             pose = stamped.pose
-            route.append(Pose2(pose.position.x, pose.position.y,
-                               self._yaw(pose.orientation)))
+            yaw = self._yaw(pose.orientation)
+            if not all(math.isfinite(value) for value in
+                       (pose.position.x, pose.position.y, yaw)):
+                self.debounce.update(False)
+                if self.active:
+                    self.operational_state = 'SAFE_STOP'
+                    self._set_state('ERROR', 'non-finite reference path')
+                return
+            route.append(Pose2(pose.position.x, pose.position.y, yaw))
         if len(route) >= 2:
             self.route = tuple(route)
+            self.reference_receive_time = self.get_clock().now()
+
+    def _mode_allowed(self):
+        allowed = {str(value).strip() for value in
+                   self.p['allowed_avoidance_modes']}
+        return self.current_mode in allowed
+
+    def _mcu_mode(self, msg):
+        previous_allowed = self._mode_allowed()
+        self.current_mode = str(msg.data).strip()
+        if not self._mode_allowed():
+            self._reset_avoidance('MCU_MODE_NOT_ALLOWED')
+        elif not previous_allowed:
+            self.operational_state = 'MONITORING'
+            self._set_state('FOLLOWING_CSV', 'mode 5 monitoring enabled')
+
+    def _set_active(self, active):
+        self.active = bool(active)
+        self._publish_active()
+
+    def _publish_active(self):
+        self.active_pub.publish(Bool(data=bool(self.active)))
+
+    def _reset_avoidance(self, reason):
+        self.active = False
+        self.operational_state = 'INACTIVE'
+        self.debounce = ReplanDebounce(
+            int(self.p['collision_confirmation_frames']))
+        self.selected_track = None
+        self.avoidance_started = False
+        self.stopped_since = None
+        self.last_collision_evaluation_scan_count = self.scan_count
+        self.future = None
+        self.path_relevant_track_ids.clear()
+        self.replan_pub.publish(Bool(data=False))
+        if hasattr(self, '_clear_completed_plan'):
+            self._clear_completed_plan()
+        self._set_state('FOLLOWING_CSV', reason)
+        self._publish_active()
 
     def _control_source(self, msg):
         if msg.data == 'LIDAR':
             self.avoidance_started = True
+            self.operational_state = 'AVOIDING'
+        elif msg.data == 'REJOINING' and self.active:
+            self.operational_state = 'REJOINING'
         elif msg.data == 'GPS' and self.avoidance_started:
             completed_track = self.selected_track.track_id if self.selected_track else -1
             if completed_track >= 0:
@@ -344,8 +436,7 @@ class AvoidanceCoordinator(Node):
                     if self.passed_obstacle_s else None,
                 }, sort_keys=True))
             self.debounce = ReplanDebounce(
-                1 if bool(self.p['fixed_environment_mode']) else
-                int(self.p['confirmation_frames']))
+                int(self.p.get('collision_confirmation_frames', 3)))
             # Associations accumulated while the vehicle follows a large
             # avoidance arc mix different visible faces of segmented curbs.
             # They are not valid motion evidence after CSV rejoin.  Start a
@@ -360,6 +451,11 @@ class AvoidanceCoordinator(Node):
             self.selected_track = None
             self.future = None
             self.avoidance_started = False
+            if hasattr(self, '_set_active'):
+                self._set_active(False)
+            else:
+                self.active = False
+            self.operational_state = 'MONITORING'
             if hasattr(self, '_clear_completed_plan'):
                 self._clear_completed_plan()
             self.replan_pub.publish(Bool(data=False))
@@ -436,6 +532,9 @@ class AvoidanceCoordinator(Node):
             self.past_extrapolation_count += 1
         else:
             self.missing_frame_count += 1
+        if getattr(self, 'active', False):
+            self.operational_state = 'SAFE_STOP'
+            self._set_state('ERROR', f'LiDAR TF failure: {detail}')
 
     def _drain_scan_queue(self):
         if not self.pending_scans:
@@ -704,6 +803,11 @@ class AvoidanceCoordinator(Node):
         self._update_cpu_usage()
         self._publish_stop_contract()
         self._watchdog()
+        if not self._mode_allowed():
+            if self.debounce.count or self.active:
+                self._reset_avoidance('MCU_MODE_NOT_ALLOWED')
+            self._publish_status()
+            return
         if self.state == 'TIME_RESET_STOP':
             if self._time_reset_recovery_ready():
                 resume = self.time_reset_resume_state or 'FOLLOWING_CSV'
@@ -721,6 +825,9 @@ class AvoidanceCoordinator(Node):
             self._publish_status()
             return
         if not self.tf_ready or self.odom is None or len(self.route) < 2:
+            if not self.active:
+                self.debounce.update(False)
+                self.selected_track = None
             self._publish_status()
             return
         if self.state == 'DYNAMIC_OBSTACLE_STOP' and self.selected_track is not None:
@@ -743,7 +850,8 @@ class AvoidanceCoordinator(Node):
                         f'{self.selected_track.track_id}')
         if (self.state == 'DYNAMIC_OBSTACLE_STOP' and self.selected_track is not None and
                 self.selected_track.state == STATIC_OBSTACLE):
-            self.debounce = ReplanDebounce(int(self.p['confirmation_frames']))
+            self.debounce = ReplanDebounce(
+                int(self.p['collision_confirmation_frames']))
             # The follower already latched its stop on the dynamic hazard.  It
             # cannot drive closer to re-enter the distance trigger, so promote
             # the now-confirmed static track directly into stopped planning.
@@ -832,8 +940,8 @@ class AvoidanceCoordinator(Node):
                 'd': track_projection.d, 'x': track.x, 'y': track.y,
                 'lidar_surface_distance_m': risk.lidar_surface_distance,
                 'collision_path_index': risk.collision_path_index})
-            if remembered_risk:
-                risks.append((risk.lidar_surface_distance, track, risk))
+            if risk.required:
+                risks.append((risk.collision_path_distance, track, risk))
         self.last_track_decisions = track_decisions
         for decision in track_decisions:
             track_id = decision['track_id']
@@ -853,19 +961,29 @@ class AvoidanceCoordinator(Node):
                 Float32(data=float(risk.obstacle_center_distance)))
             self.collision_point_distance_pub.publish(
                 Float32(data=float(risk.collision_point_distance)))
-            if (risk.lidar_surface_distance <=
-                    float(self.p['replan_trigger_distance_m']) or risk.emergency):
+            self.collision_path_distance_pub.publish(
+                Float32(data=float(risk.collision_path_distance)))
+            new_lidar_frame = (
+                self.scan_count != self.last_collision_evaluation_scan_count)
+            if new_lidar_frame:
+                self.last_collision_evaluation_scan_count = self.scan_count
+            trigger = risk_within_activation_distance(
+                risk, float(self.p['replan_trigger_distance_m']))
+            if trigger:
                 self.selected_track = track
-                if track.state == DYNAMIC_OBSTACLE:
-                    self.debounce.latched = True
-                    self._set_state('DYNAMIC_OBSTACLE_STOP', 'dynamic obstacle intersects CSV path')
-                    self.replan_pub.publish(Bool(data=True))
-                elif self.debounce.update(True, track.track_id):
+                confirmed = (self.debounce.update(True, track.track_id)
+                             if new_lidar_frame else self.debounce.latched)
+                if confirmed:
+                    self._set_active(True)
                     current = self._current_pose()
                     twist = self.odom.twist.twist
                     self.get_logger().info('STOP_TRIGGER ' + json.dumps({
                         'track_id': track.track_id,
                         'lidar_surface_distance_m': risk.lidar_surface_distance,
+                        'vehicle_front_surface_distance_m':
+                            risk.vehicle_front_surface_distance,
+                        'collision_path_distance_m': risk.collision_path_distance,
+                        'confirmation_frames': self.debounce.count,
                         'vehicle_x': current.x, 'vehicle_y': current.y,
                         'vehicle_yaw': current.yaw,
                         'obstacle_x': track.x, 'obstacle_y': track.y,
@@ -874,19 +992,37 @@ class AvoidanceCoordinator(Node):
                         'odom_angular_speed_rps': twist.angular.z,
                         'stamp_ns': self.get_clock().now().nanoseconds,
                     }, sort_keys=True))
-                    self._set_state('OBSTACLE_CONFIRMED', f'track={track.track_id}')
-                    self._set_state('REPLAN_REQUIRED', f'track={track.track_id}')
                     self.replan_pub.publish(Bool(data=True))
-                    self._set_state('STOPPING', 'waiting for odom-confirmed stop')
-                else:
+                    if track.state == DYNAMIC_OBSTACLE:
+                        self.operational_state = 'SAFE_STOP'
+                        self._set_state(
+                            'DYNAMIC_OBSTACLE_STOP',
+                            'confirmed dynamic obstacle intersects reference path')
+                    else:
+                        self.operational_state = 'STOPPING'
+                        self._set_state('OBSTACLE_CONFIRMED', f'track={track.track_id}')
+                        self._set_state('REPLAN_REQUIRED', f'track={track.track_id}')
+                        self._set_state('STOPPING', 'waiting for odom-confirmed stop')
+                elif new_lidar_frame:
                     self._set_state('OBSTACLE_CANDIDATE', f'track={track.track_id}')
-        elif self.state == 'OBSTACLE_CANDIDATE':
-            self.debounce.update(False)
-            self._set_state('FOLLOWING_CSV', '')
+            elif new_lidar_frame and not self.active:
+                self.debounce.update(False)
+                self.selected_track = None
+                self._set_state('FOLLOWING_CSV', 'collision outside trigger distance')
+        elif not self.active:
+            new_lidar_frame = (
+                self.scan_count != self.last_collision_evaluation_scan_count)
+            if new_lidar_frame:
+                self.last_collision_evaluation_scan_count = self.scan_count
+                self.debounce.update(False)
+                self.selected_track = None
+                if self.state == 'OBSTACLE_CANDIDATE':
+                    self._set_state('FOLLOWING_CSV', '')
         self._publish_status()
 
     def _advance_planning(self):
         if self.state == 'STOPPING':
+            self.operational_state = 'STOPPING'
             twist = self.odom.twist.twist
             stopped = (abs(twist.linear.x) <= float(self.p['stopped_linear_speed_mps']) and
                        abs(twist.angular.z) <= float(self.p['stopped_angular_speed_rps']))
@@ -900,6 +1036,7 @@ class AvoidanceCoordinator(Node):
                 self.stopped_since = None
             return
         if self.state == 'STOPPED_FOR_PLANNING':
+            self.operational_state = 'PLANNING'
             self._set_state('DETECTING_BOUNDARIES',
                             f'{len(self.walls)} confirmed wall segments')
             return
@@ -971,8 +1108,10 @@ class AvoidanceCoordinator(Node):
             self.performance['total_planning_ms'] = elapsed_ms
             self._publish_plan(result, elapsed_ms)
             if result.selected is None:
+                self.operational_state = 'SAFE_STOP'
                 self._set_state('PATH_INFEASIBLE', 'no collision-free <=25 deg candidate')
             else:
+                self.operational_state = 'PLANNING'
                 self._set_state('PATH_READY', f'candidate={result.selected.candidate_id}')
                 selected = result.selected
                 self.get_logger().info('PATH_READY_METRICS ' + json.dumps({
@@ -993,14 +1132,38 @@ class AvoidanceCoordinator(Node):
                 }, sort_keys=True))
 
     def _watchdog(self):
+        now = self.get_clock().now()
+        odom_age = (math.inf if self.odom_receive_time is None else
+                    (now-self.odom_receive_time).nanoseconds/1e9)
+        if self.active:
+            if odom_age > float(self.p['odom_timeout_sec']):
+                self.operational_state = 'SAFE_STOP'
+                self._set_state('ERROR', f'odometry timeout {odom_age:.3f}s')
+                return
+            reference_timeout = float(self.p['reference_path_timeout_sec'])
+            if (reference_timeout > 0.0 and
+                    (self.reference_receive_time is None or
+                     (now-self.reference_receive_time).nanoseconds/1e9 >
+                     reference_timeout)):
+                self.operational_state = 'SAFE_STOP'
+                self._set_state('ERROR', 'reference path timeout')
+                return
+        elif odom_age > float(self.p['odom_timeout_sec']):
+            self.debounce.update(False)
+            self.selected_track = None
         if self.last_front_scan_time is None:
+            if not self.active:
+                self.debounce.update(False)
             return
-        age = (self.get_clock().now()-self.last_front_scan_time).nanoseconds/1e9
+        age = (now-self.last_front_scan_time).nanoseconds/1e9
         if age > float(self.p['scan_timeout_sec']) and self.state not in (
                 'PATH_READY', 'PATH_INFEASIBLE', 'DYNAMIC_OBSTACLE_STOP'):
             self.scan_drops += 1
-            if self.debounce.latched:
+            if self.active:
+                self.operational_state = 'SAFE_STOP'
                 self._set_state('ERROR', f'front scan timeout {age:.3f}s')
+            else:
+                self.debounce.update(False)
 
     def _update_cpu_usage(self):
         now = time.perf_counter()
@@ -1033,19 +1196,30 @@ class AvoidanceCoordinator(Node):
             raise ValueError(f'unknown planner state {state}')
         changed = state != self.state or reason != self.reason
         self.state, self.reason = state, reason
+        if not self._mode_allowed():
+            self.operational_state = 'INACTIVE'
+        elif not self.active:
+            self.operational_state = 'MONITORING'
+        elif state == 'STOPPING':
+            self.operational_state = 'STOPPING'
+        elif state in (
+                'STOPPED_FOR_PLANNING', 'DETECTING_BOUNDARIES',
+                'BUILDING_CORRIDOR', 'GENERATING_CANDIDATES',
+                'VALIDATING_CANDIDATES', 'PATH_READY'):
+            self.operational_state = (
+                'AVOIDING' if self.avoidance_started else 'PLANNING')
+        elif state in (
+                'PATH_INFEASIBLE', 'DYNAMIC_OBSTACLE_STOP',
+                'TIME_RESET_STOP', 'ERROR'):
+            self.operational_state = 'SAFE_STOP'
         if changed:
             self.state_history.append(state)
             self.get_logger().info(f'{state}: {reason}')
             self._publish_status()
 
     def _publish_stop_contract(self):
-        active = self.debounce.latched or self.state in (
-            'STOPPING', 'STOPPED_FOR_PLANNING', 'DETECTING_BOUNDARIES',
-            'BUILDING_CORRIDOR', 'GENERATING_CANDIDATES',
-            'VALIDATING_CANDIDATES', 'PATH_READY', 'PATH_INFEASIBLE',
-            'DYNAMIC_OBSTACLE_STOP', 'TIME_RESET_STOP', 'ERROR')
-        if active:
-            self.replan_pub.publish(Bool(data=True))
+        active = getattr(self, 'active', self.debounce.latched)
+        self.replan_pub.publish(Bool(data=bool(active)))
 
     def _marker(self, namespace, marker_id, marker_type, stamp=None):
         marker = Marker()
@@ -1307,6 +1481,13 @@ class AvoidanceCoordinator(Node):
         self._publish_obstacle_status(obstacle_statuses)
         payload = {
             'state': self.state, 'reason': self.reason,
+            'operational_state': self.operational_state,
+            'avoidance_active': self.active,
+            'mcu_mode': self.current_mode,
+            'mode_allowed': self._mode_allowed(),
+            'collision_confirmation_count': self.debounce.count,
+            'collision_confirmation_frames':
+                int(self.p['collision_confirmation_frames']),
             'selected_track_id': self.selected_track.track_id if self.selected_track else -1,
             'track_count': len(self.tracks), 'wall_count': len(self.walls),
             'scan_count': self.scan_count, 'scan_drops': self.scan_drops,
@@ -1347,7 +1528,8 @@ class AvoidanceCoordinator(Node):
         self.status_marker_pub.publish(marker)
 
     def destroy_node(self):
-        self.replan_pub.publish(Bool(data=True if self.debounce.latched else False))
+        self.replan_pub.publish(Bool(data=bool(self.active)))
+        self._publish_active()
         self.worker.shutdown(wait=False, cancel_futures=True)
         super().destroy_node()
 

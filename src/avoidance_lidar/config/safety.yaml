@@ -32,3 +32,7 @@ lidar_safety:
     odom_timeout_sec: 0.50
     steering_sign: -1.0
     publish_rate_hz: 20.0
+    active_topic: /avoidance/active
+    active_timeout_sec: 0.30
+    mode_topic: /mcu/current_mode
+    allowed_avoidance_modes: ['5']

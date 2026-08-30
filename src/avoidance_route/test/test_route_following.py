@@ -167,7 +167,7 @@ def _time_control_fake(now_ns, last_ns):
             'clock_reset_threshold_s': 1.0,
             'clock_forward_jump_threshold_s': 2.0,
         }, _publish_stop=Mock(), _publish_status=Mock(),
-        _handle_time_jump=Mock())
+        _handle_time_jump=Mock(), _active_authority_valid=lambda _now: True)
 
 
 def test_control_with_none_time_publishes_exactly_one_safe_cycle():
@@ -264,8 +264,7 @@ def test_route_and_avoidance_use_one_requested_command_pair():
         control_source_pub=Mock(),
         control_source='STOP', _publish_stop=Mock())
     RouteFollower._publish_source_pair(fake, 'GPS', 7.4)
-    assert fake.requested_drive_pub.publish.call_args.args[0].data == 2.0
-    assert fake.requested_wheel_pub.publish.call_args.args[0].data == -7
+    fake._publish_stop.assert_called_once()
     RouteFollower._publish_source_pair(fake, 'LIDAR', -6.6)
     assert fake.requested_drive_pub.publish.call_args.args[0].data == 1.0
     assert fake.requested_wheel_pub.publish.call_args.args[0].data == 7
@@ -278,6 +277,32 @@ def test_requested_wheel_is_saturated_to_vehicle_contract():
         control_source_pub=Mock(), control_source='STOP', _publish_stop=Mock())
     RouteFollower._publish_source_pair(fake, 'LIDAR', -80.0)
     assert fake.requested_wheel_pub.publish.call_args.args[0].data == 27
+
+
+def test_avoidance_and_rejoining_publish_drive_level_one():
+    for source in ('LIDAR', 'REJOINING'):
+        fake = SimpleNamespace(
+            p={'avoidance_drive_level': 1.0},
+            requested_drive_pub=Mock(), requested_wheel_pub=Mock(),
+            control_source_pub=Mock(), control_source='STOP',
+            _publish_stop=Mock())
+        RouteFollower._publish_source_pair(fake, source, 8.0)
+        assert fake.requested_drive_pub.publish.call_args.args[0].data == 1.0
+        assert abs(fake.requested_wheel_pub.publish.call_args.args[0].data) <= 27
+
+
+def test_inactive_or_non_mode_five_authority_is_rejected():
+    from rclpy.time import Time
+    now = Time(nanoseconds=1_000_000_000)
+    fake = SimpleNamespace(
+        current_mode='4', avoidance_active=True,
+        last_active_receive_time=Time(nanoseconds=900_000_000),
+        p={'allowed_avoidance_modes': ['5'], 'active_timeout_sec': 0.3})
+    fake._mode_allowed = lambda: RouteFollower._mode_allowed(fake)
+    assert not RouteFollower._active_authority_valid(fake, now)
+    fake.current_mode = '5'
+    fake.avoidance_active = False
+    assert not RouteFollower._active_authority_valid(fake, now)
 
 
 def test_external_reference_path_is_accepted_without_csv():
@@ -324,6 +349,7 @@ def test_attempt_avoidance_start_succeeds_when_path_ready(tmp_path):
         avoidance_track_id=-1, avoidance_actual_path=PathMsg(),
         control_source='STOP',
         _publish_stop=Mock(), get_logger=lambda: Mock(),
+        _mode_allowed=lambda: True, avoidance_active=True,
         _pose=lambda: (0.0, 0.0, 0.0))
     ok, message = RouteFollower._attempt_avoidance_start(fake)
     assert ok and fake.state == 'FOLLOWING_AVOIDANCE'
@@ -335,7 +361,8 @@ def test_attempt_avoidance_start_succeeds_when_path_ready(tmp_path):
 def test_attempt_avoidance_start_fails_without_path_ready():
     fake = SimpleNamespace(
         state='WAITING_FOR_AVOIDANCE_START', planner_state='PLANNING',
-        selected_points=(), _publish_stop=Mock())
+        selected_points=(), _publish_stop=Mock(),
+        _mode_allowed=lambda: True, avoidance_active=True)
     ok, message = RouteFollower._attempt_avoidance_start(fake)
     assert not ok and 'unavailable' in message
 

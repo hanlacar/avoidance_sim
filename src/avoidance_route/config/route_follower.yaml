@@ -41,3 +41,7 @@ route_follower:
     avoidance_drive_level: 1.0
     rear_lidar_required: false
     scan_timeout_s: 0.30
+    mode_topic: /mcu/current_mode
+    allowed_avoidance_modes: ['5']
+    avoidance_active_topic: /avoidance/active
+    active_timeout_sec: 0.30

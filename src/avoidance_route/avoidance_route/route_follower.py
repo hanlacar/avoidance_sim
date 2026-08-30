@@ -80,6 +80,10 @@ class RouteFollower(Node):
             'clock_forward_jump_threshold_s': 2.0,
             'clock_reset_threshold_s': 1.0,
             'tf_timeout_s': 0.05,
+            'mode_topic': '/mcu/current_mode',
+            'allowed_avoidance_modes': ['5'],
+            'avoidance_active_topic': '/avoidance/active',
+            'active_timeout_sec': 0.30,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -155,6 +159,9 @@ class RouteFollower(Node):
         self.rejoin_index = 0
         self.transition_stop_cycles = 0
         self.control_source = 'STOP'
+        self.current_mode = None
+        self.avoidance_active = False
+        self.last_active_receive_time = None
         self.planner_state = ''
         self.selected_track_id = -1
         self.avoidance_track_id = -1
@@ -199,6 +206,10 @@ class RouteFollower(Node):
             String, '/avoidance/planner_status', self._planner_status, qos)
         self.create_subscription(
             Int32, '/avoidance/selected_track_id', self._selected_track, qos)
+        self.create_subscription(
+            String, str(self.p['mode_topic']), self._mcu_mode, 10)
+        self.create_subscription(
+            Bool, str(self.p['avoidance_active_topic']), self._active, 10)
         self.create_subscription(
             LaserScan, '/scan_front', self._scan, qos_profile_sensor_data)
         if bool(self.p['rear_lidar_required']):
@@ -328,6 +339,46 @@ class RouteFollower(Node):
             'STOPPED_FOR_REPLAN: exact-zero vehicle command latched; '
             'automatic restart disabled')
 
+    def _mode_allowed(self):
+        return self.current_mode in {
+            str(value).strip() for value in self.p['allowed_avoidance_modes']}
+
+    def _mcu_mode(self, msg):
+        self.current_mode = str(msg.data).strip()
+        if not self._mode_allowed():
+            self._reset_avoidance_authority('MCU_MODE_NOT_ALLOWED')
+
+    def _active(self, msg):
+        self.avoidance_active = bool(msg.data)
+        self.last_active_receive_time = self.get_clock().now()
+        if not self.avoidance_active:
+            self._reset_avoidance_authority('AVOIDANCE_INACTIVE')
+
+    def _active_authority_valid(self, now):
+        if (not self._mode_allowed() or not self.avoidance_active or
+                self.last_active_receive_time is None):
+            return False
+        age = (now-self.last_active_receive_time).nanoseconds/1e9
+        return 0.0 <= age <= float(self.p['active_timeout_sec'])
+
+    def _reset_avoidance_authority(self, reason):
+        self.avoidance_active = False
+        self.selected_points = ()
+        self.selected_path_receive_time = None
+        self.selected_path_signature = None
+        self.avoidance_segment = 0
+        self.avoidance_track_id = -1
+        self.replan_ignore_until_clear = False
+        self.avoidance_ready_since = None
+        self.transition_stop_cycles = 0
+        self.control_source = 'STOP'
+        if self.points:
+            self.state = 'READY' if self.odom is not None else 'WAITING_FOR_ODOM'
+        else:
+            self.state = 'WAITING_FOR_ROUTE'
+        self.reason = reason
+        self._publish_stop()
+
     def _selected_track(self, msg):
         if self.state == 'FOLLOWING_AVOIDANCE' and self.avoidance_track_id >= 0:
             if msg.data != self.avoidance_track_id:
@@ -444,6 +495,8 @@ class RouteFollower(Node):
         """Shared gate used by both the auto-start timer and the manual
         debug service. Returns (ok, message); never forces a start."""
         self._publish_stop()
+        if not self._mode_allowed() or not self.avoidance_active:
+            return False, 'avoidance authority is inactive or mode is not allowed'
         if self.state != 'WAITING_FOR_AVOIDANCE_START':
             return False, f'not ready: {self.state}'
         if self.planner_state != 'PATH_READY' or len(self.selected_points) < 2:
@@ -593,6 +646,10 @@ class RouteFollower(Node):
         dt = max(0.001, min(0.2, delta_ns/1e9))
         self.last_control_dt = dt
         self.last_control_time = now
+        if not self._active_authority_valid(now):
+            self._publish_stop()
+            self._publish_status()
+            return
         if self.state == 'TIME_RESET_STOP':
             self._publish_stop()
             if self._time_reset_recovery_ready():
@@ -651,12 +708,17 @@ class RouteFollower(Node):
                 return
             self.segment = max(self.segment, self.rejoin_index)
             self.replan_ignore_until_clear = True
-            self.state, self.reason = 'FOLLOWING', 'CSV_REJOINED'
+            self.state, self.reason = 'READY', 'REFERENCE_PATH_REJOINED'
             self.control_source = 'GPS'
-            self.csv_rejoin_recovery = True
-            self.csv_rejoin_start_xy = self._pose()[:2]
+            self.control_source_pub.publish(String(data='GPS'))
+            self.csv_rejoin_recovery = False
+            self.csv_rejoin_start_xy = None
             self.last_control_time = now
-            self.get_logger().info(f'FOLLOWING_CSV: rejoined at index {self.segment}')
+            self._publish_stop()
+            self.get_logger().info(
+                f'REFERENCE_PATH_REJOINED: released at index {self.segment}')
+            self._publish_status()
+            return
         if self.state not in ('FOLLOWING', 'FOLLOWING_AVOIDANCE',
                       'REJOIN_ALIGNING'):
             self._publish_stop()
@@ -838,7 +900,9 @@ class RouteFollower(Node):
             self._error('NON_FINITE_CONTROL', 'computed command is not finite')
             return
         steering_deg = math.degrees(self.steering)
-        self._publish_source_pair('LIDAR' if avoiding else 'GPS', steering_deg)
+        source = ('REJOINING' if self.state == 'REJOIN_ALIGNING' else
+                  'LIDAR' if avoiding else 'GPS')
+        self._publish_source_pair(source, steering_deg)
         self.cross_track_samples.append(result.nearest.distance)
         self.steering_samples.append(abs(steering_deg))
         self.nearest_index_pub.publish(Int32(data=result.nearest_index))
@@ -861,9 +925,7 @@ class RouteFollower(Node):
 
     def _publish_source_pair(self, source, steering_deg):
         wheel = int(round(-steering_deg))
-        if source == 'GPS':
-            drive = float(self.p['route_drive_level'])
-        elif source == 'LIDAR':
+        if source in ('LIDAR', 'REJOINING'):
             drive = float(self.p['avoidance_drive_level'])
         else:
             self._publish_stop()
@@ -1004,6 +1066,9 @@ class RouteFollower(Node):
     def _publish_status(self, result=None, goal_distance=None):
         payload = {'state': self.state, 'reason': self.reason,
                    'control_source': self.control_source,
+                   'avoidance_active': self.avoidance_active,
+                   'mcu_mode': self.current_mode,
+                   'mode_allowed': self._mode_allowed(),
                    'planner_state': self.planner_state,
                    'csv_index': self.segment,
                    'rejoin_index': self.rejoin_index,
